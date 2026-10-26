@@ -383,17 +383,35 @@ def load_shape(duty, level=None):
     return duty, 1.0
 
 
-def run_unit(compute, duty, level, stop, until):
-    intensity, share = load_shape(duty, level)
-    compute.batch(intensity)
-    if share < 1:
-        busy = compute.drain()
-        stop.wait(min(.1, busy*(1/share-1), max(0, until-time.monotonic())))
+class Pacer:
+    """Runs our units and, when sharing the GPU with the game, the gaps between them.
+
+    Windows waits are coarse (~15 ms with the default timer): asking for a
+    0.4 ms gap after each 6 ms unit would really wait ~15 ms and turn a 94 %
+    turn into ~30 %. So the gap owed after each unit is added up, taken once
+    it is worth a wait, and the time really waited is what gets paid off."""
+    MIN_WAIT = .015
+
+    def __init__(self):
+        self.owed = 0.0
+
+    def unit(self, compute, duty, level, stop, until):
+        intensity, share = load_shape(duty, level)
+        compute.batch(intensity)
+        if share >= 1:
+            self.owed = 0.0
+            return
+        self.owed = min(.5, self.owed + compute.drain()*(1/max(share, .01)-1))
+        if self.owed >= self.MIN_WAIT:
+            started = time.monotonic()
+            stop.wait(min(self.owed, .1, max(0, until-started)))
+            self.owed -= time.monotonic()-started
 
 
 def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoffs, stop, messages, report=None, level=None):
     started = time.monotonic()
     sample_at = started
+    pacer = Pacer()
     while not stop.is_set():
         now = time.monotonic()
         if now-started >= seconds:
@@ -416,7 +434,7 @@ def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoff
         if duty <= .0001:
             stop.wait(min(.02, max(0,seconds-(time.monotonic()-started))))
             continue
-        run_unit(compute, duty, level, stop, started+seconds)
+        pacer.unit(compute, duty, level, stop, started+seconds)
 
 
 def run_load(telemetry, device, target, duration, cutoff, stop, messages, process='', close_on_process=True, sensors=None, mem_cutoff=85, mode='Core', vram_mb=512, trigger=None, ramp_seconds=0, make_compute=None, processes=None):
@@ -470,6 +488,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
         start = time.monotonic()
         deadline = start + duration
         sample_at = start
+        pacer = Pacer()
         duty = 0.01
         measured = idle
         while not stop.is_set() and time.monotonic() < deadline:
@@ -531,7 +550,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
             if duty <= 0:
                 stop.wait(min(0.02, max(0, deadline-time.monotonic())))
             else:
-                run_unit(compute, duty, level, stop, deadline)
+                pacer.unit(compute, duty, level, stop, deadline)
         if stop.is_set():
             reason = 'Detenido por el usuario' 
     except Exception as exc:

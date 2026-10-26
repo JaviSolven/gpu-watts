@@ -233,7 +233,9 @@ picos de casi el máximo de la tarjeta. Ahora:
   Por eso se mantiene la intensidad que había al aparecer el juego (parecida a la
   suya) y lo que se reduce es nuestro turno: los huecos los llena el juego.
   Esos turnos siguen siendo cambios de consumo, pero a la altura de la base y no
-  de la tarjeta entera.
+  de la tarjeta entera. Windows no sabe esperar menos de ~15 ms, así que los
+  huecos cortos se van sumando y se dejan juntos, midiendo lo esperado de verdad:
+  el turno medio sale el pedido (sin esto, un 94 % se quedaba en ~30 %).
 - La retirada gradual sigue las mismas reglas: sin juego baja la intensidad de
   forma continua; con el juego abierto acorta nuestro turno.
 - Modos VRAM y Mixto: la memoria se recorre con tantos bloques como SM activos, y
