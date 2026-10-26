@@ -156,7 +156,8 @@ CSV incorpora presencia del proceso, CPU y condición, incluida la muestra de re
 LÍMITES DE POTENCIA Y PARADA
 Los W son un objetivo MEDIO APROXIMADO, NO un techo instantáneo. NVML promedia
 ~1 s en GPU modernas. Hay retardo, oscilaciones y picos no capturados.
-Alternar cálculo y pausas produce transitorios; no garantiza evitar pantallas negras.
+Sin el juego la carga es continua (ver CARGA CONTINUA); con el juego abierto se
+turna con él y esos turnos producen transitorios. No garantiza evitar pantallas negras.
 Rechaza objetivos superiores al límite vigente; sin proceso seleccionado presente,
 para si el consumo medido supera max(objetivo+30 W, objetivo*1,35). Esto tampoco impide picos instantáneos.
 No puede bajar el consumo de otras aplicaciones ni alcanzar cualquier objetivo.
@@ -216,3 +217,28 @@ Si falla un sensor, retira la carga aun sin poder actualizar su lectura; lo indi
 Si se bloquea o falla CUDA/GPU no es posible garantizar una rampa: intenta liberar
 recursos y muestra que no pudo completarla. Ningún programa puede garantizarla
 tras un fallo del controlador, pérdida de GPU o apagado del equipo.
+
+CARGA CONTINUA POR INTENSIDAD (CAMBIO TRAS LA 1.0)
+Hasta la 1.0 la carga eran ráfagas de ~6 ms con TODA la GPU, separadas por pausas:
+con un 10 % de actividad, unos 6 ms a plena potencia y 54 ms parada, unas 16 veces
+por segundo. NVML promediaba ~1 s y mostraba W estables, pero la fuente recibía
+picos de casi el máximo de la tarjeta. Ahora:
+- Sin el juego abierto, la carga es CONTINUA. La actividad ya no es el porcentaje de
+  tiempo trabajando sino el porcentaje de SM (bloques de cálculo de la GPU) que
+  trabajan: 50 % = la mitad de los SM sin parar. En una RTX 5080 (84 SM) cada SM
+  supone unos pocos W, así que el consumo sube y baja en escalones pequeños.
+  El siguiente cálculo se encola antes de esperar al anterior: no hay huecos.
+- Con el juego abierto, Windows turna la GPU entre los dos programas. Una carga
+  continua y floja le quitaría al juego la mitad del tiempo con poco consumo.
+  Por eso se mantiene la intensidad que había al aparecer el juego (parecida a la
+  suya) y lo que se reduce es nuestro turno: los huecos los llena el juego.
+  Esos turnos siguen siendo cambios de consumo, pero a la altura de la base y no
+  de la tarjeta entera.
+- La retirada gradual sigue las mismas reglas: sin juego baja la intensidad de
+  forma continua; con el juego abierto acorta nuestro turno.
+- Modos VRAM y Mixto: la memoria se recorre con tantos bloques como SM activos, y
+  el número de pasadas por tanda se ajusta para que cada tanda dure parecido.
+- La espera de la GPU ya no ocupa un núcleo de la CPU al 100 % (espera bloqueante).
+PENDIENTE DE PROBAR EN LA RTX 5080: las pruebas simulan CUDA. Comprueba en el CSV y
+con HWiNFO que la base se alcanza y que el consumo baja de forma continua. La
+relación entre actividad y W ya no es la misma que en la 1.0.

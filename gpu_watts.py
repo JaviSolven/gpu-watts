@@ -155,12 +155,14 @@ PTX = PTX.replace('MATH', '\n'.join(f'fma.rn.f32 f{i}, f{i}, 0f3F7FFF58, 0f38D1B
 PTX = PTX.replace('STORE', '\n'.join(f'st.global.f32 [addr+{4*i}], f{i};' for i in range(8))).encode() + b'\0'
 
 
+# Grid-stride loop: a few blocks cover the whole fragment, so the number of
+# blocks (busy SMs) sets the intensity instead of the size of the fragment.
 MEMORY_PTX = b""".version 6.0
 .target sm_52
 .address_size 64
 .visible .entry stream_memory(.param .u64 data, .param .u32 count) {
 .reg .pred p;
-.reg .b32 r<6>;
+.reg .b32 r<7>;
 .reg .b64 base, offset, addr;
 ld.param.u64 base, [data];
 ld.param.u32 r4, [count];
@@ -168,6 +170,9 @@ mov.u32 r0, %ctaid.x;
 mov.u32 r1, %ntid.x;
 mov.u32 r2, %tid.x;
 mad.lo.u32 r3, r0, r1, r2;
+mov.u32 r6, %nctaid.x;
+mul.lo.u32 r6, r6, r1;
+LOOP:
 setp.ge.u32 p, r3, r4;
 @p bra END;
 mul.wide.u32 offset, r3, 4;
@@ -175,9 +180,16 @@ add.u64 addr, base, offset;
 ld.global.cg.u32 r5, [addr];
 xor.b32 r5, r5, 0x9e3779b9;
 st.global.wb.u32 [addr], r5;
+add.u32 r3, r3, r6;
+bra LOOP;
 END:
 ret;
 }\0"""
+
+
+# 1024-thread blocks: two cannot share an SM (1536 resident threads on RTX 30/40/50),
+# so each block occupies its own SM and the block count is the number of busy SMs.
+THREADS = 1024
 
 
 class Compute:
@@ -206,7 +218,10 @@ class Compute:
         self.mode = mode
         self.cursor = 0
         self.vram_bytes = int(vram_mb) * 1024 * 1024
-        self.event_start, self.event_end = P(), P()
+        # Two alternating sets of (start, core end, done) events: one unit runs
+        # while the next is queued. pending = (events, loops) of the queued unit.
+        self.slots, self.turn, self.pending = [], 0, None
+        self.launched = False
         self.retained = False
         self.free = b('cuMemFree_v2', [C.c_uint64])
         self.unload = b('cuModuleUnload', [P])
@@ -218,17 +233,22 @@ class Compute:
             b('cuCtxSetCurrent', [P])(self.ctx)
             sm = I()
             b('cuDeviceGetAttribute', [C.POINTER(I), I, I])(C.byref(sm), 16, self.device)
-            self.blocks = sm.value * 4
+            self.sms = sm.value
             b('cuModuleLoadData', [C.POINTER(P), P])(C.byref(self.module), C.cast(C.c_char_p(PTX), P))
             b('cuModuleGetFunction', [C.POINTER(P), P, C.c_char_p])(C.byref(self.function), self.module, b'heat')
-            b('cuMemAlloc_v2', [C.POINTER(C.c_uint64), C.c_size_t])(C.byref(self.memory), self.blocks * 256 * 32)
+            b('cuMemAlloc_v2', [C.POINTER(C.c_uint64), C.c_size_t])(C.byref(self.memory), self.sms * THREADS * 32)
             self.launch = b('cuLaunchKernel', [P, U, U, U, U, U, U, U, P, C.POINTER(P), C.POINTER(P)])
             self.sync = b('cuCtxSynchronize', [])
+            self.wait_event = b('cuEventSynchronize', [P])
             self.record_event = b('cuEventRecord', [P, P])
             self.elapsed_event = b('cuEventElapsedTime', [C.POINTER(C.c_float), P, P])
             create_event = b('cuEventCreate', [C.POINTER(P), U])
-            create_event(C.byref(self.event_start), 0)
-            create_event(C.byref(self.event_end), 0)
+            for _ in range(2):
+                slot = (P(), P(), P())
+                self.slots.append(slot)
+                for event in slot:
+                    # CU_EVENT_BLOCKING_SYNC: the wait sleeps instead of spinning a CPU core.
+                    create_event(C.byref(event), 1)
             self.loops = 64
             if mode in ('VRAM', 'Mixto'):
                 free, total = C.c_size_t(), C.c_size_t()
@@ -242,53 +262,74 @@ class Compute:
             self.close()
             raise
 
-    def timed_gpu(self, enqueue):
+    def batch(self, intensity):
+        """Queue one unit on `intensity` (0–1) of the SMs, then wait for the previous unit.
+
+        The next unit is always queued before waiting, so the GPU never idles
+        between kernels: the load is continuous and its size is how many SMs work,
+        not full-GPU bursts separated by pauses."""
+        active = max(1, min(self.sms, round(intensity*self.sms)))
+        slot = self.slots[self.turn]
+        self.turn ^= 1
+        start, core_end, done = slot
+        self.launched = True
+        self.record_event(start, None)
+        if self.mode in ('Core', 'Mixto'):
+            loops = U(self.loops)
+            args = (P * 2)(C.cast(C.byref(self.memory), P), C.cast(C.byref(loops), P))
+            self.launch(self.function, active, 1, 1, THREADS, 1, 1, 0, None, args, None)
+        self.record_event(core_end, None)
+        if self.mode in ('VRAM', 'Mixto'):
+            self.memory_passes(active)
+        self.record_event(done, None)
+        previous, self.pending = self.pending, (slot, self.loops)
+        if previous is not None:
+            self.finish(*previous)
+
+    def drain(self):
+        """Wait for the queued unit, leaving the GPU without our work. Returns its GPU seconds."""
+        if self.pending is None:
+            return 0.0
+        pending, self.pending = self.pending, None
+        return self.finish(*pending)
+
+    def finish(self, slot, loops):
+        start, core_end, done = slot
         started = time.monotonic()
-        self.record_event(self.event_start, None)
-        enqueue()
-        self.record_event(self.event_end, None)
-        self.sync()
-        wall = time.monotonic()-started
-        if wall > .25:
+        self.wait_event(done)
+        if time.monotonic()-started > .25:
             raise RuntimeError('Respuesta GPU demasiado lenta (>250 ms). Prueba detenida.')
+        if self.mode in ('Core', 'Mixto'):
+            # Calibrate using GPU event time, not Python/driver wall time, from the
+            # loops this unit was launched with (the next one is already queued).
+            core = self.elapsed(start, core_end)
+            self.loops = max(1, min(65536, int(loops * min(2.0, max(0.5, 0.006/core)))))
+        return self.elapsed(start, done)
+
+    def elapsed(self, first, last):
         milliseconds = C.c_float()
-        self.elapsed_event(C.byref(milliseconds), self.event_start, self.event_end)
+        self.elapsed_event(C.byref(milliseconds), first, last)
         return max(milliseconds.value/1000, .000001)
 
-    def core_batch(self):
-        loops = U(self.loops)
-        args = (P * 2)(C.cast(C.byref(self.memory), P), C.cast(C.byref(loops), P))
-        elapsed = self.timed_gpu(lambda: self.launch(self.function, self.blocks, 1, 1, 256, 1, 1, 0, None, args, None))
-        # Calibrate using GPU event time, not Python/driver wall time.
-        self.loops = max(1, min(65536, int(self.loops * min(2.0, max(0.5, 0.006/max(elapsed, .000001))))))
-        return elapsed
-
-    def memory_batch(self):
-        def enqueue():
-            # Queue several bounded passes before synchronizing, avoiding a CPU wait
-            # after every tiny transfer. All addresses stay inside our own allocation.
-            for _ in range(16):
-                size = min(16*1024*1024, self.vram_bytes-self.cursor)
-                pointer, count = C.c_uint64(self.vram.value+self.cursor), U(size//4)
-                args = (P * 2)(C.cast(C.byref(pointer), P), C.cast(C.byref(count), P))
-                self.launch(self.mem_function, (count.value+255)//256, 1, 1, 256, 1, 1, 0, None, args, None)
-                self.cursor = (self.cursor+size) % self.vram_bytes
-        return self.timed_gpu(enqueue)
-
-    def batch(self):
-        busy = 0.0
-        if self.mode in ('Core', 'Mixto'):
-            busy += self.core_batch()
-        if self.mode in ('VRAM', 'Mixto'):
-            busy += self.memory_batch()
-        return busy
+    def memory_passes(self, active):
+        # Fewer SMs move less data per pass: scale the passes so a unit keeps a
+        # similar length. All addresses stay inside our own allocation.
+        for _ in range(max(1, round(16*active/self.sms))):
+            size = min(16*1024*1024, self.vram_bytes-self.cursor)
+            pointer, count = C.c_uint64(self.vram.value+self.cursor), U(size//4)
+            args = (P * 2)(C.cast(C.byref(pointer), P), C.cast(C.byref(count), P))
+            self.launch(self.mem_function, active, 1, 1, THREADS, 1, 1, 0, None, args, None)
+            self.cursor = (self.cursor+size) % self.vram_bytes
 
     def close(self):
         try:
-            if self.event_start.value:
-                self.destroy_event(self.event_start)
-            if self.event_end.value:
-                self.destroy_event(self.event_end)
+            if self.launched:
+                self.pending, self.launched = None, False
+                self.sync()  # never free memory that a queued kernel still uses
+            for slot in self.slots:
+                for event in slot:
+                    if event.value:
+                        self.destroy_event(event)
             if self.vram.value:
                 self.free(self.vram.value)
             if self.mem_module.value:
@@ -327,7 +368,28 @@ def fade_duty(initial, elapsed, seconds):
     return initial * (1.0 - 3.0*t*t + 2.0*t*t*t)
 
 
-def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoffs, stop, messages, report=None):
+def load_shape(duty, level=None):
+    """Split average activity into (intensity, share of time).
+
+    Alone on the GPU we work continuously and duty is the fraction of SMs.
+    With the watched game open, Windows time-slices both processes: we keep
+    the intensity we had when it appeared (`level`, comparable to the game's)
+    and shrink our turn instead, so the game fills our gaps. Continuous work
+    at low intensity would take half the GPU time at low power."""
+    if level:
+        return level, max(0.0, min(1.0, duty/level))
+    return duty, 1.0
+
+
+def run_unit(compute, duty, level, stop, until):
+    intensity, share = load_shape(duty, level)
+    compute.batch(intensity)
+    if share < 1:
+        busy = compute.drain()
+        stop.wait(min(.1, busy*(1/share-1), max(0, until-time.monotonic())))
+
+
+def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoffs, stop, messages, report=None, level=None):
     started = time.monotonic()
     sample_at = started
     while not stop.is_set():
@@ -352,9 +414,7 @@ def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoff
         if duty <= .0001:
             stop.wait(min(.02, max(0,seconds-(time.monotonic()-started))))
             continue
-        busy = compute.batch()
-        pause = min(.1, busy*(1/duty-1))
-        stop.wait(min(pause,max(0,seconds-(time.monotonic()-started))))
+        run_unit(compute, duty, level, stop, started+seconds)
 
 
 def run_load(telemetry, device, target, duration, cutoff, stop, messages, process='', close_on_process=True, sensors=None, mem_cutoff=85, mode='Core', vram_mb=512, trigger=None, ramp_seconds=0):
@@ -364,6 +424,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
     samples = []
     output = writer = None
     duty = .01
+    level = None  # intensity kept while the watched process is open (see load_shape)
     start = time.monotonic()
     try:
         if not math.isfinite(ramp_seconds) or not 0 <= ramp_seconds <= 30:
@@ -414,6 +475,10 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                 messages.put(('temperatures', temperatures))
                 measured, temp, limit = telemetry.read(h)
                 process_present = bool(process) and process in {n.casefold() for n in process_names()}
+                if not process_present:
+                    level = None
+                elif level is None:
+                    level = duty
                 counters = process_cpu_times(process) if process_present and trigger.uses_cpu else None
                 ready = False
                 if process:
@@ -462,10 +527,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
             if duty <= 0:
                 stop.wait(min(0.02, max(0, deadline-time.monotonic())))
             else:
-                busy = compute.batch()
-                # Average duty control; individual kernels can still cause brief power peaks.
-                pause = min(0.1, busy * (1.0 / duty - 1.0))
-                stop.wait(min(pause, max(0, deadline-time.monotonic())))
+                run_unit(compute, duty, level, stop, deadline)
         if stop.is_set():
             reason = 'Detenido por el usuario' 
     except Exception as exc:
@@ -482,7 +544,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                             output.flush()
                     # Ordinary stop/X/Esc requests cannot interrupt withdrawal.
                     # Force-close terminates the OS process instead.
-                    ramp_down(compute,duty,ramp_seconds,telemetry,h,sensors,cutoffs,threading.Event(),messages,report_ramp)
+                    ramp_down(compute,duty,ramp_seconds,telemetry,h,sensors,cutoffs,threading.Event(),messages,report_ramp,level)
                 except Exception as exc:
                     reason += f' | No se pudo completar la retirada CUDA: {exc}'
             try:

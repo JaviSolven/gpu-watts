@@ -43,10 +43,9 @@ class FadeTests(unittest.TestCase):
         stop=threading.Event()
         class Compute(FakeCompute):
             calls=0
-            def batch(self):
+            def batch(self,intensity):
                 self.__class__.calls+=1
                 stop.set()
-                return .001
         q=queue.Queue()
         with patch.object(app,'Compute',Compute):
             app.run_load(FakeTelemetry(),0,100,5,75,stop,q,sensors=FakeSensors(),ramp_seconds=.02)
@@ -75,7 +74,7 @@ class FadeTests(unittest.TestCase):
         self.assertTrue(any(k=='sample' and 'gradualmente' in v[4] for k,v in q.queue))
     def test_cuda_failure_reports_impossible_fade_and_releases(self):
         class Broken(FakeCompute):
-            def batch(self):raise RuntimeError('CUDA GPU lost')
+            def batch(self,intensity):raise RuntimeError('CUDA GPU lost')
         q=queue.Queue()
         with patch.object(app,'Compute',Broken):
             app.run_load(FakeTelemetry(),0,100,5,75,threading.Event(),q,sensors=FakeSensors(),ramp_seconds=.02)

@@ -98,27 +98,74 @@ class SensorTests(unittest.TestCase):
         self.assertTrue(FakeCompute.instances[0].closed)
         self.assertIn(('done','Tiempo completado'),list(q.queue))
 
-    def test_cuda_event_time_excludes_host_wait(self):
+    def fake_compute(self, mode='Core', sms=84):
         obj = app.Compute.__new__(app.Compute)
-        obj.event_start, obj.event_end = C.c_void_p(1), C.c_void_p(2)
+        obj.mode, obj.sms, obj.loops = mode, sms, 64
+        obj.slots = [(C.c_void_p(1),C.c_void_p(2),C.c_void_p(3)), (C.c_void_p(4),C.c_void_p(5),C.c_void_p(6))]
+        obj.turn, obj.pending, obj.launched = 0, None, False
+        obj.memory, obj.function = C.c_uint64(0), None
         obj.record_event = lambda *_: None
-        obj.sync = lambda: None
+        obj.launches = []
+        obj.launch = lambda *args: obj.launches.append(args)
+        return obj
+    def test_cuda_event_time_excludes_host_wait(self):
+        obj = self.fake_compute()
+        obj.wait_event = lambda _: None
         def measured(ptr, *_):
             C.cast(ptr,C.POINTER(C.c_float)).contents.value = 1.0
         obj.elapsed_event = measured
         with patch.object(app.time,'monotonic',side_effect=[0.0,.020]):
-            self.assertAlmostEqual(obj.timed_gpu(lambda: None),.001)
-    def test_core_calibration_uses_device_duration(self):
-        obj = app.Compute.__new__(app.Compute)
-        obj.loops, obj.blocks = 64, 32
-        obj.memory, obj.function = C.c_uint64(0), None
-        obj.timed_gpu = lambda _: .001
-        obj.core_batch()
+            self.assertAlmostEqual(obj.finish(obj.slots[0],64),.001)
+    def test_core_calibration_uses_launch_loops_and_device_duration(self):
+        obj = self.fake_compute()
+        obj.loops = 999  # already changed for the queued unit; must not compound
+        obj.wait_event = lambda _: None
+        obj.elapsed = lambda *_: .001
+        obj.finish(obj.slots[0],64)
         self.assertEqual(obj.loops,128)
+    def test_intensity_sets_busy_sms_not_bursts(self):
+        obj = self.fake_compute()
+        obj.finish = lambda *_: .001
+        for intensity,blocks in [(1,84),(.5,42),(.004,1),(0,1),(2,84)]:
+            obj.launches.clear()
+            obj.batch(intensity)
+            grid, threads = obj.launches[0][1], obj.launches[0][4]
+            self.assertEqual((grid,threads),(blocks,app.THREADS))
+    def test_next_unit_is_queued_before_waiting(self):
+        obj = self.fake_compute()
+        waited = []
+        obj.finish = lambda slot,loops: waited.append((slot,len(obj.launches)))
+        obj.batch(.5)
+        self.assertEqual(waited,[])
+        obj.batch(.5)
+        # Waits for the first unit only after launching the second one.
+        self.assertEqual(waited,[(obj.slots[0],2)])
+        self.assertEqual(obj.pending[0],obj.slots[1])
+        obj.drain()
+        self.assertEqual(waited[-1][0],obj.slots[1])
+        self.assertIsNone(obj.pending)
+        self.assertEqual(obj.drain(),0.0)
+    def test_close_waits_for_queued_unit(self):
+        obj = self.fake_compute()
+        calls = []
+        def broken(*args):
+            raise RuntimeError('launch failed')
+        obj.launch = broken
+        with self.assertRaises(RuntimeError):
+            obj.batch(.5)  # failed half-way: nothing pending, but work may be queued
+        obj.sync = lambda: calls.append('sync')
+        obj.destroy_event = lambda e: calls.append('event')
+        obj.free = lambda _: calls.append('free')
+        obj.unload = lambda _: calls.append('unload')
+        obj.vram, obj.mem_module, obj.module = C.c_uint64(0), C.c_void_p(), C.c_void_p()
+        obj.memory = C.c_uint64(7)
+        obj.retained = False
+        obj.close()
+        self.assertEqual(calls[0],'sync')
+        self.assertLess(calls.index('sync'),calls.index('free'))
 
     def test_memory_chunk_bounds_and_wrap(self):
-        obj = app.Compute.__new__(app.Compute)
-        obj.mode = 'VRAM'
+        obj = self.fake_compute('VRAM')
         obj.vram = C.c_uint64(0x100000)
         obj.mem_function = None
         obj.vram_bytes = 64*1024*1024
@@ -130,12 +177,9 @@ class SensorTests(unittest.TestCase):
             count = C.cast(kernel_args[1],C.POINTER(C.c_uint)).contents.value
             calls.append((pointer,count))
         obj.launch = launch
-        obj.sync = lambda: None
-        def timing(enqueue):
-            enqueue()
-            return .001
-        obj.timed_gpu = timing
-        for _ in range(4): obj.batch()
+        obj.finish = lambda *_: .001
+        for _ in range(4): obj.batch(1)
+        self.assertEqual(len(calls),64)
         self.assertEqual(obj.cursor,0)
         self.assertEqual(len(set(p for p,_ in calls)),4)
         for pointer,count in calls:

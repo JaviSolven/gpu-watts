@@ -16,7 +16,9 @@ class FakeCompute:
     def __init__(self, uuid, mode='Core', vram_mb=512):
         self.closed = False
         self.__class__.instances.append(self)
-    def batch(self):
+    def batch(self, intensity):
+        pass
+    def drain(self):
         return 0.001
     def close(self):
         self.closed = True
