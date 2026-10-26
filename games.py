@@ -143,5 +143,9 @@ def game_executables(folder, depth=4):
                     found.append((name, path.stat().st_size, path))
                 except OSError:
                     continue
+    return likely_first(found)
+
+
+def likely_first(found):
     # The game is usually the largest executable that is not a helper.
     return sorted(found, key=lambda exe: (bool(HELPERS.search(exe[0])), -exe[1], exe[0].casefold()))

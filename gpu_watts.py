@@ -664,6 +664,8 @@ def main(simulate=False):
     style.configure('Sim.TLabelframe.Label', font=('Segoe UI', 11, 'bold'), foreground='#b00020')
     texts = dict(HELP)
     if simulate:
+        texts['steam'] += ('\n\nEN SIMULACIÓN: muestra una biblioteca de ejemplo con nombres de .exe inventados, '
+                           'para ensayar. Con la tarjeta real lee tu Steam de verdad.')
         texts['base'] += ('\n\nAjuste REAL del programa: también existe con la tarjeta de verdad. No lo confundas con '
                           '«W del juego simulado», que solo existe en la simulación.')
     canvas = tk.Canvas(root, highlightthickness=0)
@@ -987,7 +989,7 @@ def main(simulate=False):
     forget_button.configure(command=forget_game)
     def open_steam():
         try:
-            installed = steam_games()
+            installed = telemetry.steam_games() if simulate else steam_games()
         except OSError as exc:
             messagebox.showerror('Steam', f'No se pudo leer la biblioteca: {exc}')
             return
@@ -995,7 +997,7 @@ def main(simulate=False):
             messagebox.showinfo('Steam', 'No se encuentran juegos de Steam instalados en este equipo.')
             return
         dialog = tk.Toplevel(root)
-        dialog.title('Juegos de Steam')
+        dialog.title('Juegos de Steam SIMULADOS (ejemplos inventados, no tu biblioteca)' if simulate else 'Juegos de Steam')
         dialog.geometry('620x460')
         dialog.transient(root)
         dialog.grab_set()
@@ -1016,7 +1018,7 @@ def main(simulate=False):
             if not game_list.curselection():
                 return
             folder = installed[game_list.curselection()[0]][1]
-            candidates.extend(game_executables(folder))
+            candidates.extend(telemetry.game_executables(folder) if simulate else game_executables(folder))
             for name, size, path in candidates:
                 exe_list.insert('end', f'{name}   ({size/1048576:.0f} MB)   {path.parent.relative_to(folder)}')
             if candidates:

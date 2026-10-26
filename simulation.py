@@ -6,9 +6,11 @@ its own, both share GPU time, and readings lag like NVML's ~1 s average.
 """
 import collections
 import math
+from pathlib import Path
 import random
 import threading
 import time
+from games import likely_first
 from sensors import check_temperatures
 
 IDLE, FULL, LIMIT = 35.0, 340.0, 360.0
@@ -17,6 +19,18 @@ UNIT = .006            # seconds of GPU work per simulated unit
 WINDOW = .5            # how far back our activity is averaged
 LOADING = 6.0          # seconds of loading screen before the game renders
 LOADING_DEMAND = .12   # share of the card a loading screen uses
+MB = 1024*1024
+# Example Steam library. Executable names and sizes are INVENTED examples,
+# not the real ones of these games: only the shape of a library is real.
+STEAM_ROOT = Path(r'C:\Steam simulado\steamapps\common')
+STEAM_LIBRARY = {
+    '3DMark Steel Nomad': ('Steel Nomad', [('SteelNomad.exe', 185*MB, '.'), ('SteelNomadLauncher.exe', 6*MB, '.'),
+                                           ('CrashReporter.exe', 2*MB, '.')]),
+    'Crimson Desert': ('Crimson Desert', [('CrimsonDesert.exe', 412*MB, 'bin64'), ('Launcher.exe', 9*MB, '.'),
+                                          ('CrashReporter.exe', 3*MB, 'bin64'), ('EasyAntiCheat_EOS_Setup.exe', 5*MB, 'EasyAntiCheat')]),
+    'Juego de ejemplo con lanzador': ('Juego Ejemplo', [('JuegoEjemplo-Win64-Shipping.exe', 160*MB, r'JuegoEjemplo\Binaries\Win64'),
+                                                        ('JuegoEjemplo.exe', 1*MB, '.'), ('UnityCrashHandler64.exe', 2*MB, '.')]),
+}
 
 
 class SimulatedGpu:
@@ -41,6 +55,18 @@ class SimulatedGpu:
     def processes(self):
         game = self.game
         return {game[0]} if game else set()
+
+    # The simulated Steam library, same shapes as games.steam_games/game_executables.
+    @staticmethod
+    def steam_games():
+        return sorted(((name, STEAM_ROOT / folder) for name, (folder, _) in STEAM_LIBRARY.items()), key=lambda g: g[0].casefold())
+
+    @staticmethod
+    def game_executables(folder):
+        for name, (game_folder, executables) in STEAM_LIBRARY.items():
+            if STEAM_ROOT / game_folder == Path(folder):
+                return likely_first([(exe, size, Path(folder) / sub / exe) for exe, size, sub in executables])
+        return []
 
     def game_demand(self, now):
         game = self.game

@@ -53,6 +53,19 @@ class SimulationTests(unittest.TestCase):
         core, memory = gpu.sensors().read()
         self.assertEqual(memory, core+7.5)
         self.assertIsNone(gpu.sensors(monitor_vram=False).read()[1])
+    def test_simulated_steam_library(self):
+        installed = sim.SimulatedGpu.steam_games()
+        names = [name for name, _ in installed]
+        self.assertIn('Crimson Desert', names)
+        self.assertEqual(names, sorted(names, key=str.casefold))
+        folder = dict(installed)['Crimson Desert']
+        found = sim.SimulatedGpu.game_executables(folder)
+        self.assertEqual([name for name, _, _ in found][0], 'CrimsonDesert.exe')
+        self.assertEqual({name for name, _, _ in found[-2:]}, {'EasyAntiCheat_EOS_Setup.exe', 'CrashReporter.exe'})  # helpers last
+        self.assertEqual(str(found[0][2].parent.relative_to(folder)), 'bin64')
+        launcher = sim.SimulatedGpu.game_executables(dict(installed)['Juego de ejemplo con lanzador'])
+        self.assertEqual(launcher[0][0], 'JuegoEjemplo-Win64-Shipping.exe')
+        self.assertEqual(sim.SimulatedGpu.game_executables(sim.STEAM_ROOT / 'otro'), [])
     def test_run_load_reaches_towards_the_base(self):
         gpu, q = sim.SimulatedGpu(), queue.Queue()
         app.run_load(gpu, 0, 150, 3, 75, threading.Event(), q, sensors=gpu.sensors(), make_compute=gpu.compute, processes=gpu.processes)

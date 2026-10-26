@@ -282,6 +282,9 @@ tarjeta NVIDIA, también te ofrece abrir la simulación.
 - Ensayo típico: INICIAR, esperar a «Base aproximada alcanzada», abrir el juego
   simulado y ver el relevo hasta que la ventana se cierra sola.
 - Los juegos guardados y los CSV de registro se guardan igual que en el modo real.
+- «Steam…» muestra una biblioteca de EJEMPLO (Steel Nomad, Crimson Desert y un
+  juego con lanzador) para ensayar el recorrido Steam → INICIAR → relevo. Los
+  nombres de sus .exe son inventados; con la tarjeta real se lee tu Steam.
 Es un modelo aproximado: sirve para ver el comportamiento del programa, no para
 predecir los W exactos de tu tarjeta ni de un juego concreto.
 
