@@ -1,15 +1,15 @@
 @echo off
 cd /d "%~dp0"
-where py >nul 2>nul
+rem pyw / pythonw: Python sin ventana de consola, asi solo queda GPU Watts.
+rem Si algo falla, el error sale en un aviso y en %LOCALAPPDATA%\GPU_Watts\errores.log
+where pyw >nul 2>nul
 if not errorlevel 1 (
-    py -3 gpu_watts.py
-    if errorlevel 1 pause
+    start "" pyw -3 gpu_watts.py
     exit /b
 )
-where python >nul 2>nul
+where pythonw >nul 2>nul
 if not errorlevel 1 (
-    python gpu_watts.py
-    if errorlevel 1 pause
+    start "" pythonw gpu_watts.py
     exit /b
 )
 echo Instala Python 3 de 64 bits desde https://www.python.org/downloads/windows/

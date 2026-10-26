@@ -364,3 +364,10 @@ no vuelve a ayudar aunque el total baje, y el relevo termina al llegar a cero
 de carga, con el juego gastando poco, sigue sosteniendo la base como antes.
 Si el juego gasta menos del 70 % de la base, conviene bajar la base para ese
 juego: cada juego guarda sus propios ajustes.
+
+SIN VENTANA DE CONSOLA (CAMBIO TRAS LA 1.0)
+INICIAR.bat y SIMULAR.bat arrancan Python con pyw (o pythonw), que no abre
+ventana de consola: la ventana negra se cierra al instante y solo queda GPU
+Watts. Como ya no hay consola donde ver un fallo, cualquier error inesperado
+(también dentro de la ventana) sale en un aviso y se guarda en
+%LOCALAPPDATA%\GPU_Watts\errores.log, con fecha y hora.

@@ -691,6 +691,8 @@ def main(simulate=False):
     import tkinter as tk
     from tkinter import ttk, messagebox
     root = tk.Tk()
+    # Errors inside the window (button callbacks, timers) are logged and shown too.
+    root.report_callback_exception = lambda kind, value, trace: report_error(kind, value, trace, parent=root)
     root.geometry('1080x780')
     root.minsize(920, 560)
     if not simulate:
@@ -1260,5 +1262,41 @@ def main(simulate=False):
     poll()
     root.mainloop()
 
+def error_log_path():
+    return Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GPU_Watts' / 'errores.log'
+
+
+def report_error(kind, value, trace, parent=None):
+    """Keep an unexpected error in errores.log and show it.
+
+    INICIAR.bat starts Python with pyw, without a console, so a traceback
+    printed to the console would be lost."""
+    import traceback
+    text = ''.join(traceback.format_exception(kind, value, trace))
+    path = error_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as log:
+            log.write(f'--- {time.strftime("%Y-%m-%d %H:%M:%S")}\n{text}\n')
+    except OSError:
+        pass
+    if sys.stderr is not None:
+        sys.stderr.write(text)
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        owner = parent or tk.Tk()
+        if parent is None:
+            owner.withdraw()
+        messagebox.showerror('GPU Watts', f'Error inesperado: {value}\n\nDetalles guardados en:\n{path}', parent=owner)
+        if parent is None:
+            owner.destroy()
+    except Exception:
+        pass
+
+
 if __name__ == '__main__':
-    main(simulate='--simular' in sys.argv[1:])
+    try:
+        main(simulate='--simular' in sys.argv[1:])
+    except Exception:
+        report_error(*sys.exc_info())
