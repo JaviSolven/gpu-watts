@@ -1,0 +1,218 @@
+GPU WATTS — versión 1.0 experimental — Windows / NVIDIA
+
+USO PARA EVITAR PASAR DIRECTAMENTE DE REPOSO A CARGA ALTA
+1. Selecciona la GPU, base 200 W y modo Core (o Mixto si también quieres memoria).
+2. Mantén la fuente de temperatura que ya te funciona, por ejemplo CSV HWiNFO.
+3. Selecciona el ejecutable REAL del juego y Relevo adaptativo (mantener base).
+4. Suavidad 5 s, confirmación 2 s, espera inicial 2 s. Ajusta el límite de carga
+   suficientemente alto para la apertura del juego; predeterminado 120 s + retirada.
+5. INICIA primero GPU Watts. Espera a ver una base cercana a 200 W antes de abrir
+   el juego. No se puede evitar una transición desde 40 W si abres el juego antes
+   de establecer esa base. El propio calentamiento inicial también es gradual.
+6. Al abrirse el proceso, el programa acompaña la subida ajustando su aportación.
+
+NUEVO MODO ADAPTATIVO (PREDETERMINADO EN V1.0)
+Antes del proceso regula el consumo TOTAL de la tarjeta hacia la base elegida.
+Después del proceso reduce nuestra actividad paulatinamente cuando el total
+sube/cubre la base y vuelve a aportar si baja, hasta la actividad previa al juego.
+No congela nuestra carga ni inicia una simple cuenta atrás para quitarla toda.
+El ajuste se limita según Suavidad para evitar un cambio brusco de actividad.
+Suavidad expresa la escala mínima de una retirada completa cuando sobra consumo;
+no significa que el relevo termine necesariamente a los 5 segundos. Puede tardar
+más si el juego necesita apoyo durante menús, shaders o pantallas de carga.
+
+Cierre: nuestra actividad debe haber llegado a CERO y el consumo TOTAL debe
+mantener al menos el 95% de la base durante la confirmación, tras la espera inicial.
+Con base 200 W y confirmación 2 s: cero trabajo propio y al menos 190 W reportados
+por la tarjeta durante 2 s. Si cae antes, cancela la confirmación y repone apoyo.
+Después libera CUDA y cierra si la casilla está marcada. No vuelve a arrancar
+tras cerrarse: caídas posteriores en el juego ya no se compensan.
+
+Los W NO se separan por proceso: son la tarjeta completa, incluido escritorio y
+cualquier otra aplicación. El 200 W es el total antes del juego, NO 200 W extra
+sobre el consumo en reposo. No se puede demostrar que todos los W restantes
+sean del juego; solo que el proceso existe y nuestra actividad ya es cero.
+El umbral de GPU y CPU de los modos clásicos no se usa en el modo adaptativo.
+Parar, Esc, X, temporizador y temperatura conservan la retirada gradual solicitada.
+Si termina el tiempo antes del relevo, también retirará la carga aunque el juego
+no esté preparado. Puedes aumentar el límite de carga para dar tiempo al arranque.
+
+LÍMITE FÍSICO
+Solo controla nuestra aportación media. No puede imponer al juego que suba
+lentamente ni limitar instantáneamente su consumo. Si el juego exige 300 W de
+golpe, pueden coexistir temporalmente su demanda y nuestra carga hasta que
+reaccione el controlador. NVML promedia ~1 s y el programa sondea ~0,5 s: no es
+un regulador eléctrico, no garantiza eliminar picos ni arreglar pantallas negras.
+Esta versión se valida con simulaciones; falta verificar el relevo en tu RTX 5080.
+
+REQUISITOS Y ARRANQUE
+Windows 10/11 y Python 3.10+ de 64 bits con Tcl/Tk; controlador NVIDIA oficial.
+Extrae TODO el ZIP, abre INICIAR.bat. No requiere pip, CUDA Toolkit ni administrador.
+
+CONTROLES
+- GPU: selecciona la tarjeta que quieres cargar y vigilar.
+- Objetivo W: consumo TOTAL MEDIO de la tarjeta; no son W adicionales.
+- Duración: límite de carga/espera desde el inicio; al acabar añade la retirada gradual.
+  Excluye preparar CUDA. Ejemplo: 120 s de carga + hasta 5 s de retirada.
+- Modo Core: multiplicaciones y sumas FP32.
+- Modo VRAM: lectura/escritura coalescente de un bloque de memoria dedicado.
+- Modo Mixto: alterna cálculos core y pasadas de VRAM.
+- VRAM a recorrer: 64–4096 MiB; predeterminado 512 MiB. Solo afecta VRAM/Mixto.
+  Recorre el bloque entero por fragmentos de hasta 16 MiB y vuelve a empezar.
+  Rechaza reservas mayores del 70 % de la memoria libre y deja al menos 1 GiB.
+  Es carga de memoria, no una prueba de integridad: NO detecta corrupción.
+- Temperaturas de parada independientes: core 75 y VRAM 85 °C. El hotspot se ha retirado de lectura y parada.
+  Son valores iniciales de la aplicación, no especificaciones oficiales ni garantías.
+- Proceso: nombre exacto del ejecutable, sin ruta. Vacío desactiva el relevo.
+  El cierre depende de la condición elegida; ver sección RELEVO más abajo.
+- PARAR / Esc / cerrar ventana: solicita detener y liberar la carga.
+  Usa la barra lateral para acceder a controles en pantallas pequeñas.
+
+VIGILANCIA DE CORE Y VRAM
+En NVIDIA directo y CSV HWiNFO, cada ~0,5 segundos comprueba core y VRAM. Si alguno llega a su límite,
+no está disponible o falla la lectura, no inicia o detiene la carga.
+No sustituye temperaturas ausentes por cero ni por estimaciones.
+
+FUENTE 1 — NVIDIA DIRECTO
+Intenta NVML: temperatura GPU y campo MEMORY_TEMP. No consulta el hotspot. No todas las tarjetas/controladores exponen estos datos.
+Si dice sensor no disponible, utiliza CSV. No se garantiza disponibilidad directa.
+
+OPCIÓN NVIDIA SOLO CORE (SIN VIGILANCIA VRAM)
+Si el controlador no facilita la temperatura de memoria, puedes seleccionar
+"NVIDIA solo core (sin vigilancia VRAM)" en el desplegable de fuente.
+Esta elección es manual: no se activa automáticamente si un sensor falla.
+Solo lee el core y conserva su parada térmica; no consulta el hotspot ni la VRAM.
+Se muestra "VRAM NO VIGILADA" y se desactiva su límite de temperatura.
+Core, VRAM y Mixto siguen disponibles, pero no hay protección de este programa
+por temperatura de memoria en esta opción. No es equivalente a vigilar ambas.
+Para mantener vigilancia de memoria, usa CSV HWiNFO con sus sensores reales.
+CSV propio deja la temperatura VRAM vacía y vram_temperature_monitored=False.
+
+FUENTE 2 — CSV HWiNFO
+1. Abre HWiNFO, ventana Sensors. Comprueba que muestra los dos sensores reales
+   de tu GPU; si tampoco los muestra, este programa no puede inventarlos.
+2. Activa sensor logging a un archivo CSV, intervalo de 0,5–1 segundos.
+   Mantén HWiNFO abierto y registrando durante toda la prueba.
+3. Pulsa Elegir CSV activo y selecciona ese archivo.
+4. Selecciona las columnas de CORE y GPU MEMORY JUNCTION de
+   LA MISMA GPU seleccionada. Deben estar en °C. Los nombres pueden estar
+   traducidos o repetidos: el índice distingue las columnas duplicadas.
+   No selecciones CPU, máximos históricos, límites térmicos ni sensores en °F.
+5. Exige dos columnas diferentes y valores numéricos plausibles; no puede
+   verificar automáticamente que hayas seleccionado los sensores correctos.
+   CSV UTF-8/Windows-1252 con coma/punto y coma y punto/coma decimal.
+   Si no recibe nuevas filas o el archivo tiene más de 5 s de antigüedad, para.
+   El retardo de protección incluye el intervalo de actualización del CSV.
+
+PRIMER USO
+Para el objetivo actual: base 200 W, límite 120 s, 512 MiB, ajustes de fábrica.
+Espera a establecer la base antes de abrir el juego. Elige Core, VRAM o Mixto.
+La carga empieza baja: un pulso breve puede terminar sin alcanzar el objetivo.
+Los W controlan la actividad TOTAL del modo. No hay objetivos W independientes
+para core y VRAM ni regulación de temperatura exacta. A pocos W puede calentar poco.
+
+RELEVO POR PROCESO Y CONSUMO (NUEVO EN V0.7)
+Selecciona o escribe el ejecutable REAL del juego/benchmark, no su lanzador.
+Opciones clásicas: Al aparecer; GPU supera W; CPU del proceso supera %; GPU o CPU; GPU y CPU.
+Los límites de GPU y CPU se interpretan como >= (incluyen igualdad).
+
+- GPU: lectura TOTAL de la tarjeta NVIDIA seleccionada, incluida esta precarga,
+  escritorio y otras aplicaciones. NO hay una lectura de W por proceso aquí.
+  Se exige además que el ejecutable elegido exista; eso no atribuye los W a él.
+  Escoge un umbral mayor que el objetivo de precarga en más de un 10% o 10 W.
+- CPU: suma del tiempo CPU de las instancias del nombre exacto elegido, normalizada
+  al 0–100% del equipo. No incluye lanzadores ni procesos hijos con otro nombre.
+  Por ejemplo, en 16 procesadores lógicos un hilo ocupado equivale a ~6,25%.
+  Necesita al menos dos muestras. Si Windows deniega la lectura, detiene con error.
+- GPU o CPU: basta una de las condiciones. GPU y CPU exige ambas simultáneamente.
+- Espera inicial: segundos desde que se detecta el proceso antes de evaluar cierre.
+- Mantener condición: tiempo seguido sobre el umbral. Si baja, reinicia la cuenta.
+- Si desaparece el proceso, reinicia espera/confirmación y vuelve a regular precarga.
+- No cierra al abrirse el proceso en los modos con umbral, aunque ya esté abierto
+  al pulsar Iniciar. Al aparecer conserva el comportamiento inmediato anterior.
+- Marcar Cerrar también esta ventana termina la carga y después Python/aplicación
+  al cumplirse el relevo Y terminar la retirada gradual. Desmarcar deja la ventana abierta.
+
+Ejemplo configurable: precarga 100 W; GPU supera 160 W; espera inicial 2 s;
+mantener condición 2 s; límite de carga 120 s; retirada gradual 5 s; cierre automático activado.
+Es un ejemplo de funcionamiento, no un umbral validado para todos los juegos.
+La CPU puede subir al compilar shaders antes de renderizar: no prueba que ya se juegue.
+
+SOLO MODOS CLÁSICOS: al aparecer el proceso se CONGELA nuestra actividad hasta
+el relevo. Así la regulación no compensa el consumo del juego bajando la precarga.
+Durante esa espera puede superarse el objetivo de W: se espera precisamente la
+subida conjunta. Se conserva la vigilancia térmica, el límite vigente del driver,
+el botón Parar y el límite de duración. La parada por objetivo+30 W/+35% NO se aplica
+mientras está presente el proceso elegido; podría impedir alcanzar el umbral.
+Si el proceso no aparece, se mantiene esa parada por consumo excesivo.
+La duración limita la carga/espera y puede terminar antes de cumplirse el umbral;
+a continuación se añade la retirada gradual configurada.
+
+Sondeo ~0,5 s más retardo de sensores/controlador y liberación CUDA. No es un
+relevo instantáneo ni sincronizado con el primer fotograma. No garantiza evitar
+transitorios ni pantallas negras. No mata, inyecta ni arranca procesos ajenos.
+CSV incorpora presencia del proceso, CPU y condición, incluida la muestra de relevo.
+
+LÍMITES DE POTENCIA Y PARADA
+Los W son un objetivo MEDIO APROXIMADO, NO un techo instantáneo. NVML promedia
+~1 s en GPU modernas. Hay retardo, oscilaciones y picos no capturados.
+Alternar cálculo y pausas produce transitorios; no garantiza evitar pantallas negras.
+Rechaza objetivos superiores al límite vigente; sin proceso seleccionado presente,
+para si el consumo medido supera max(objetivo+30 W, objetivo*1,35). Esto tampoco impide picos instantáneos.
+No puede bajar el consumo de otras aplicaciones ni alcanzar cualquier objetivo.
+No modifica voltajes, BIOS, clocks, ventiladores ni power limit.
+Si se bloquea Windows o el driver, el botón y temporizador no garantizan la parada.
+Con tu historial, la prueba puede reproducir pantalla negra y ventiladores al 100 %.
+Guarda el trabajo antes y no repitas en bucle si reaparece el fallo.
+
+CAMBIO DE CARGA EN V0.6
+La calibración mide tiempo real de GPU mediante eventos CUDA, en vez de atribuir
+las esperas de Python/controlador a trabajo de GPU. Esto evita acortar demasiado
+los cálculos y añadir pausas excesivas. El core ajusta cálculos hacia ~6 ms y la
+VRAM agrupa 16 pasadas pequeñas antes de sincronizar. La regulación sube hasta
+8 puntos de actividad por lectura, según la diferencia con los W objetivo.
+Al terminar se muestran el máximo medido y la última lectura para evaluar si
+ha alcanzado el objetivo. El objetivo sigue siendo aproximado, no una garantía.
+
+REGISTRO Y VALIDACIÓN
+CSV propio en %LOCALAPPDATA%\GPU_Watts\logs con dos temperaturas, consumo,
+objetivo, actividad programada, modo y memoria reservada.
+48 pruebas de lógica con sensores y CUDA simulados. No ejecutado en Windows real
+ni RTX 5080 aquí. Falta validar en tu PC sensores, compilación CUDA, carga de VRAM
+y regulación real. Fuente y pruebas incluidos; versión experimental.
+
+REFERENCIAS
+https://docs.nvidia.com/deploy/nvml-api/change-log.html
+https://docs.nvidia.com/deploy/nvml-api/latest/api/group__nvmlDeviceEnums.html
+https://docs.nvidia.com/deploy/nvml-api/latest/api/group__nvmlFieldValueEnums.html
+https://docs.nvidia.com/cuda/cuda-driver-api/
+https://docs.nvidia.com/cuda/parallel-thread-execution/
+https://www.hwinfo.com/forum/threads/how-to-save-temperature-report.9274/
+
+CPU Windows: https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes
+
+RETIRADA GRADUAL (NUEVO EN V0.8)
+Elige 0,5–30 segundos; predeterminado 5 s. Al confirmarse el relevo o agotarse el
+límite de carga, reduce la actividad media desde su valor actual hasta cero,
+con una curva suave (smoothstep). Después libera CUDA y memoria y, en un relevo
+con cierre automático marcado, termina la aplicación. No mata el juego.
+La rampa se AÑADE a la duración de carga y se sigue vigilando la temperatura.
+PARAR, Esc, cerrar la ventana, temperatura, errores de sensores y temporizador
+inician también la rampa. Solo FORZAR CIERRE INMEDIATO termina sin esperar.
+No es un regulador eléctrico: cada kernel todavía produce actividad discreta,
+y el juego, el driver y los relojes cambian el consumo. No garantiza ausencia
+de picos ni un gráfico de W suave, ni elimina la causa de una inestabilidad.
+El juego comparte GPU con la precarga durante los segundos de retirada; puede
+perder FPS durante ese intervalo. El CSV identifica la fase retirada gradual.
+
+CAMBIO V0.9 — TODAS LAS PARADAS SOLICITAN RETIRADA GRADUAL
+Parar, Esc, X, temporizador, relevo, consumo elevado y temperatura: primero rampa,
+luego liberación CUDA. X cierra la ventana después de esperar a terminar la rampa.
+FORZAR CIERRE INMEDIATO finaliza el proceso Python sin rampa ni espera; Windows
+libera sus recursos. Finalizar tarea desde Windows tiene el mismo carácter forzado.
+Los umbrales de temperatura ahora indican CUÁNDO INICIAR LA RETIRADA, no un techo
+infranqueable: seguirá existiendo carga decreciente hasta agotar la rampa.
+Si falla un sensor, retira la carga aun sin poder actualizar su lectura; lo indica.
+Si se bloquea o falla CUDA/GPU no es posible garantizar una rampa: intenta liberar
+recursos y muestra que no pudo completarla. Ningún programa puede garantizarla
+tras un fallo del controlador, pérdida de GPU o apagado del equipo.

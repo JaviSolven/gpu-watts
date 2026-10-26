@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# Registros que genera el programa (normalmente van a %LOCALAPPDATA%\GPU_Watts\logs)
+*.csv
+logs/
+
+# Paquetes de distribución
+*.zip

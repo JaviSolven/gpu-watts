@@ -1,0 +1,3 @@
+# Mantener los saltos de línea tal como están en la 1.0
+* text=auto eol=lf
+*.bat text eol=crlf

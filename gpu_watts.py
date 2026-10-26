@@ -1,0 +1,744 @@
+"""GPU Watts: Windows/NVIDIA, Python 3.10+, standard library only."""
+import ctypes as C
+import csv
+import math
+import os
+from pathlib import Path
+import queue
+import sys
+import threading
+import time
+from sensors import NativeSensors, CsvSensors, check_temperatures
+from cutover import Cutover, MODES, read_cpu_times, AdaptiveHandoff, ADAPTIVE_MODE
+
+P = C.c_void_p
+U = C.c_uint
+I = C.c_int
+
+
+def bind(lib, name, args):
+    f = getattr(lib, name)
+    f.argtypes = args
+    f.restype = I
+    def call(*values):
+        code = f(*values)
+        if code:
+            raise RuntimeError(f'{name}: error {code}')
+    return call
+
+
+class ProcessEntry(C.Structure):
+    _fields_ = [('dwSize', U), ('cntUsage', U), ('th32ProcessID', U),
+                ('th32DefaultHeapID', C.c_size_t), ('th32ModuleID', U),
+                ('cntThreads', U), ('th32ParentProcessID', U),
+                ('pcPriClassBase', C.c_long), ('dwFlags', U),
+                ('szExeFile', C.c_wchar * 260)]
+
+
+def process_entries():
+    lib = C.WinDLL('kernel32', use_last_error=True)
+    snapshot = lib.CreateToolhelp32Snapshot
+    snapshot.argtypes, snapshot.restype = [U, U], P
+    first, nxt = lib.Process32FirstW, lib.Process32NextW
+    for fn in (first, nxt):
+        fn.argtypes, fn.restype = [P, C.POINTER(ProcessEntry)], I
+    close = lib.CloseHandle
+    close.argtypes, close.restype = [P], I
+    handle = snapshot(2, 0)
+    if handle == P(-1).value:
+        raise C.WinError(C.get_last_error())
+    try:
+        entry = ProcessEntry()
+        entry.dwSize = C.sizeof(entry)
+        ok = first(handle, C.byref(entry))
+        result = []
+        while ok:
+            result.append((entry.szExeFile, entry.th32ProcessID))
+            ok = nxt(handle, C.byref(entry))
+        error = C.get_last_error()
+        if error != 18:  # ERROR_NO_MORE_FILES
+            raise C.WinError(error)
+        return result
+    finally:
+        close(handle)
+
+
+def process_names():
+    return {name for name, _ in process_entries()}
+
+
+def process_cpu_times(process):
+    return read_cpu_times([pid for name,pid in process_entries() if name.casefold() == process])
+
+
+def normalized_process(value):
+    value = value.strip()
+    if not value:
+        return ''
+    if any(c in value for c in ('/', '\\', ':', '*', '?', '"')):
+        raise ValueError('Escribe solo el nombre del proceso, sin ruta ni comodines.')
+    return (value if value.lower().endswith('.exe') else value + '.exe').casefold()
+
+
+class Telemetry:
+    def __init__(self):
+        if sys.platform != 'win32' or C.sizeof(P) != 8:
+            raise RuntimeError('Requiere Windows y Python de 64 bits.')
+        paths = [str(Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32' / 'nvml.dll'),
+                 str(Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'NVIDIA Corporation' / 'NVSMI' / 'nvml.dll')]
+        for path in paths:
+            try:
+                self.lib = C.WinDLL(path)
+                break
+            except OSError:
+                pass
+        else:
+            raise RuntimeError('No se encuentra NVML. Reinstala el controlador NVIDIA oficial.')
+        bind(self.lib, 'nvmlInit_v2', [])()
+        self.shutdown = bind(self.lib, 'nvmlShutdown', [])
+        self.handle = bind(self.lib, 'nvmlDeviceGetHandleByIndex_v2', [U, C.POINTER(P)])
+        self.name = bind(self.lib, 'nvmlDeviceGetName', [P, C.c_char_p, U])
+        self.uuid = bind(self.lib, 'nvmlDeviceGetUUID', [P, C.c_char_p, U])
+        self.power = bind(self.lib, 'nvmlDeviceGetPowerUsage', [P, C.POINTER(U)])
+        self.temp = bind(self.lib, 'nvmlDeviceGetTemperature', [P, U, C.POINTER(U)])
+        self.limit = bind(self.lib, 'nvmlDeviceGetEnforcedPowerLimit', [P, C.POINTER(U)])
+        n = U()
+        bind(self.lib, 'nvmlDeviceGetCount_v2', [C.POINTER(U)])(C.byref(n))
+        self.devices = []
+        for index in range(n.value):
+            h, name, uuid = P(), C.create_string_buffer(128), C.create_string_buffer(96)
+            self.handle(index, C.byref(h))
+            self.name(h, name, 128)
+            self.uuid(h, uuid, 96)
+            self.devices.append((h, name.value.decode(), uuid.value.decode()))
+        if not self.devices:
+            raise RuntimeError('No hay GPU NVIDIA disponible.')
+
+    def read(self, h):
+        w, t, limit = U(), U(), U()
+        self.power(h, C.byref(w))
+        self.temp(h, 0, C.byref(t))
+        self.limit(h, C.byref(limit))
+        return w.value / 1000, t.value, limit.value / 1000
+
+
+# Eight independent FMA chains, all written to device memory, prevent dead-code removal.
+PTX = '''.version 6.0
+.target sm_52
+.address_size 64
+.visible .entry heat(.param .u64 output, .param .u32 loops) {
+.reg .pred p;
+.reg .b32 r<6>;
+.reg .b64 addr, offset, base;
+.reg .f32 f<9>;
+ld.param.u64 base, [output];
+ld.param.u32 r4, [loops];
+mov.u32 r0, %ctaid.x;
+mov.u32 r1, %ntid.x;
+mov.u32 r2, %tid.x;
+mad.lo.u32 r3, r0, r1, r2;
+cv t PLACEHOLDER
+mov.u32 r5, 0;
+INITIAL
+LOOP:
+MATH
+add.u32 r5, r5, 1;
+setp.lt.u32 p, r5, r4;
+@p bra LOOP;
+mul.wide.u32 offset, r3, 32;
+add.u64 addr, base, offset;
+STORE
+ret;
+}'''.replace('cv t PLACEHOLDER', 'cvt.rn.f32.u32 f8, r3;')
+PTX = PTX.replace('INITIAL', '\n'.join(f'add.f32 f{i}, f8, {float(i+1):.1f};' for i in range(8)))
+PTX = PTX.replace('MATH', '\n'.join(f'fma.rn.f32 f{i}, f{i}, 0f3F7FFF58, 0f38D1B717;' for _ in range(8) for i in range(8)))
+PTX = PTX.replace('STORE', '\n'.join(f'st.global.f32 [addr+{4*i}], f{i};' for i in range(8))).encode() + b'\0'
+
+
+MEMORY_PTX = b""".version 6.0
+.target sm_52
+.address_size 64
+.visible .entry stream_memory(.param .u64 data, .param .u32 count) {
+.reg .pred p;
+.reg .b32 r<6>;
+.reg .b64 base, offset, addr;
+ld.param.u64 base, [data];
+ld.param.u32 r4, [count];
+mov.u32 r0, %ctaid.x;
+mov.u32 r1, %ntid.x;
+mov.u32 r2, %tid.x;
+mad.lo.u32 r3, r0, r1, r2;
+setp.ge.u32 p, r3, r4;
+@p bra END;
+mul.wide.u32 offset, r3, 4;
+add.u64 addr, base, offset;
+ld.global.cg.u32 r5, [addr];
+xor.b32 r5, r5, 0x9e3779b9;
+st.global.wb.u32 [addr], r5;
+END:
+ret;
+}\0"""
+
+
+class Compute:
+    def __init__(self, uuid, mode='Core', vram_mb=512):
+        self.lib = C.WinDLL('nvcuda.dll')
+        b = lambda name, args: bind(self.lib, name, args)
+        b('cuInit', [U])(0)
+        count = I()
+        b('cuDeviceGetCount', [C.POINTER(I)])(C.byref(count))
+        get_uuid = b('cuDeviceGetUuid', [P, I])
+        self.device = None
+        for dev in range(count.value):
+            raw = (C.c_ubyte * 16)()
+            get_uuid(raw, dev)
+            s = bytes(raw).hex()
+            text = 'GPU-' + '-'.join([s[:8], s[8:12], s[12:16], s[16:20], s[20:]])
+            if text.lower() == uuid.lower():
+                self.device = dev
+                break
+        if self.device is None:
+            raise RuntimeError('La GPU seleccionada no coincide con un dispositivo CUDA.')
+        self.ctx, self.module, self.function = P(), P(), P()
+        self.memory = C.c_uint64()
+        self.vram = C.c_uint64()
+        self.mem_module, self.mem_function = P(), P()
+        self.mode = mode
+        self.cursor = 0
+        self.vram_bytes = int(vram_mb) * 1024 * 1024
+        self.event_start, self.event_end = P(), P()
+        self.retained = False
+        self.free = b('cuMemFree_v2', [C.c_uint64])
+        self.unload = b('cuModuleUnload', [P])
+        self.release = b('cuDevicePrimaryCtxRelease_v2', [I])
+        self.destroy_event = b('cuEventDestroy_v2', [P])
+        try:
+            b('cuDevicePrimaryCtxRetain', [C.POINTER(P), I])(C.byref(self.ctx), self.device)
+            self.retained = True
+            b('cuCtxSetCurrent', [P])(self.ctx)
+            sm = I()
+            b('cuDeviceGetAttribute', [C.POINTER(I), I, I])(C.byref(sm), 16, self.device)
+            self.blocks = sm.value * 4
+            b('cuModuleLoadData', [C.POINTER(P), P])(C.byref(self.module), C.cast(C.c_char_p(PTX), P))
+            b('cuModuleGetFunction', [C.POINTER(P), P, C.c_char_p])(C.byref(self.function), self.module, b'heat')
+            b('cuMemAlloc_v2', [C.POINTER(C.c_uint64), C.c_size_t])(C.byref(self.memory), self.blocks * 256 * 32)
+            self.launch = b('cuLaunchKernel', [P, U, U, U, U, U, U, U, P, C.POINTER(P), C.POINTER(P)])
+            self.sync = b('cuCtxSynchronize', [])
+            self.record_event = b('cuEventRecord', [P, P])
+            self.elapsed_event = b('cuEventElapsedTime', [C.POINTER(C.c_float), P, P])
+            create_event = b('cuEventCreate', [C.POINTER(P), U])
+            create_event(C.byref(self.event_start), 0)
+            create_event(C.byref(self.event_end), 0)
+            self.loops = 64
+            if mode in ('VRAM', 'Mixto'):
+                free, total = C.c_size_t(), C.c_size_t()
+                b('cuMemGetInfo_v2', [C.POINTER(C.c_size_t), C.POINTER(C.c_size_t)])(C.byref(free), C.byref(total))
+                if self.vram_bytes > min(free.value * .70, free.value - 1024**3):
+                    raise RuntimeError('VRAM insuficiente: reduce los MB. Se reserva al menos 1 GiB libre.')
+                b('cuMemAlloc_v2', [C.POINTER(C.c_uint64), C.c_size_t])(C.byref(self.vram), self.vram_bytes)
+                b('cuModuleLoadData', [C.POINTER(P), P])(C.byref(self.mem_module), C.cast(C.c_char_p(MEMORY_PTX), P))
+                b('cuModuleGetFunction', [C.POINTER(P), P, C.c_char_p])(C.byref(self.mem_function), self.mem_module, b'stream_memory')
+        except Exception:
+            self.close()
+            raise
+
+    def timed_gpu(self, enqueue):
+        started = time.monotonic()
+        self.record_event(self.event_start, None)
+        enqueue()
+        self.record_event(self.event_end, None)
+        self.sync()
+        wall = time.monotonic()-started
+        if wall > .25:
+            raise RuntimeError('Respuesta GPU demasiado lenta (>250 ms). Prueba detenida.')
+        milliseconds = C.c_float()
+        self.elapsed_event(C.byref(milliseconds), self.event_start, self.event_end)
+        return max(milliseconds.value/1000, .000001)
+
+    def core_batch(self):
+        loops = U(self.loops)
+        args = (P * 2)(C.cast(C.byref(self.memory), P), C.cast(C.byref(loops), P))
+        elapsed = self.timed_gpu(lambda: self.launch(self.function, self.blocks, 1, 1, 256, 1, 1, 0, None, args, None))
+        # Calibrate using GPU event time, not Python/driver wall time.
+        self.loops = max(1, min(65536, int(self.loops * min(2.0, max(0.5, 0.006/max(elapsed, .000001))))))
+        return elapsed
+
+    def memory_batch(self):
+        def enqueue():
+            # Queue several bounded passes before synchronizing, avoiding a CPU wait
+            # after every tiny transfer. All addresses stay inside our own allocation.
+            for _ in range(16):
+                size = min(16*1024*1024, self.vram_bytes-self.cursor)
+                pointer, count = C.c_uint64(self.vram.value+self.cursor), U(size//4)
+                args = (P * 2)(C.cast(C.byref(pointer), P), C.cast(C.byref(count), P))
+                self.launch(self.mem_function, (count.value+255)//256, 1, 1, 256, 1, 1, 0, None, args, None)
+                self.cursor = (self.cursor+size) % self.vram_bytes
+        return self.timed_gpu(enqueue)
+
+    def batch(self):
+        busy = 0.0
+        if self.mode in ('Core', 'Mixto'):
+            busy += self.core_batch()
+        if self.mode in ('VRAM', 'Mixto'):
+            busy += self.memory_batch()
+        return busy
+
+    def close(self):
+        try:
+            if self.event_start.value:
+                self.destroy_event(self.event_start)
+            if self.event_end.value:
+                self.destroy_event(self.event_end)
+            if self.vram.value:
+                self.free(self.vram.value)
+            if self.mem_module.value:
+                self.unload(self.mem_module)
+            if self.memory.value:
+                self.free(self.memory.value)
+        finally:
+            try:
+                if self.module.value:
+                    self.unload(self.module)
+            finally:
+                if self.retained:
+                    self.release(self.device)
+                    self.retained = False
+
+
+def next_duty(duty, target, measured, limit):
+    error = target - measured
+    if abs(error) <= max(3, target * 0.03):
+        return duty
+    step = max(-0.20, min(0.08, error / max(limit, 1) * 0.60))
+    return max(0.0, min(1.0, duty + step))
+
+
+def validate(target, duration, cutoff):
+    if not all(math.isfinite(x) for x in (target, duration, cutoff)):
+        raise ValueError('Introduce números finitos.')
+    if not 10 <= target <= 1000 or not 1 <= duration <= 86400 or not 45 <= cutoff <= 85:
+        raise ValueError('Rangos: 10–1000 W; 1–86400 segundos; 45–85 °C.')
+
+
+def fade_duty(initial, elapsed, seconds):
+    if seconds <= 0:
+        return 0.0
+    t = max(0.0, min(1.0, elapsed/seconds))
+    return initial * (1.0 - 3.0*t*t + 2.0*t*t*t)
+
+
+def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoffs, stop, messages, report=None):
+    started = time.monotonic()
+    sample_at = started
+    while not stop.is_set():
+        now = time.monotonic()
+        if now-started >= seconds:
+            break
+        duty = fade_duty(initial_duty, now-started, seconds)
+        if now >= sample_at:
+            try:
+                # During withdrawal, thresholds have already requested a stop.
+                # Keep displaying readings while activity decreases to zero.
+                temperatures = check_temperatures(sensors.read(), require_memory=getattr(sensors,'monitor_vram',True))
+                measured, temp, limit = telemetry.read(handle)
+                messages.put(('temperatures', temperatures))
+                messages.put(('sample',(measured,temp,duty,max(0,seconds-(now-started)),'Retirando precarga gradualmente')))
+                if report:
+                    report(now, measured, temperatures, duty, limit)
+            except Exception as exc:
+                messages.put(('status', f'Retirada gradual; lectura/registro no disponible: {exc}'))
+            sample_at = now+.25
+        # Duty regulates average activity, not the GPU's instantaneous electrical power.
+        if duty <= .0001:
+            stop.wait(min(.02, max(0,seconds-(time.monotonic()-started))))
+            continue
+        busy = compute.batch()
+        pause = min(.1, busy*(1/duty-1))
+        stop.wait(min(pause,max(0,seconds-(time.monotonic()-started))))
+
+
+def run_load(telemetry, device, target, duration, cutoff, stop, messages, process='', close_on_process=True, sensors=None, mem_cutoff=85, mode='Core', vram_mb=512, trigger=None, ramp_seconds=0):
+    compute = None
+    reason = 'Tiempo completado'
+    detected = False
+    samples = []
+    output = writer = None
+    duty = .01
+    start = time.monotonic()
+    try:
+        if not math.isfinite(ramp_seconds) or not 0 <= ramp_seconds <= 30:
+            raise ValueError('La retirada gradual debe durar entre 0 y 30 segundos.')
+        trigger = trigger or Cutover(mode='Al aparecer')
+        adaptive = AdaptiveHandoff(target,ramp_seconds,trigger.hold,trigger.grace) if trigger.mode == ADAPTIVE_MODE else None
+        if process and trigger.mode == 'Al aparecer' and process in {n.casefold() for n in process_names()}:
+            detected = True
+            reason = f'Proceso ya abierto: {process}; no se ha iniciado carga'
+            return
+        h, name, uuid = telemetry.devices[device]
+        sensors = sensors or NativeSensors(telemetry, h)
+        cutoffs = (cutoff, mem_cutoff)
+        temperatures = check_temperatures(sensors.read(), cutoffs, require_memory=getattr(sensors, 'monitor_vram', True))
+        messages.put(('temperatures', temperatures))
+        idle, temp, limit = telemetry.read(h)
+        if process and trigger.uses_gpu:
+            if trigger.watts <= target + max(10, target*.10):
+                raise ValueError('El umbral GPU debe superar el objetivo de precarga al menos un 10% o 10 W.')
+            if trigger.watts > limit:
+                raise ValueError('El umbral de relevo GPU supera el límite de potencia vigente.')
+        if target > limit:
+            raise ValueError(f'Objetivo superior al límite vigente ({limit:.0f} W).')
+        if temp >= cutoff:
+            raise ValueError('Temperatura inicial igual o superior a la parada.')
+        if idle > target + 5:
+            raise ValueError(f'Consumo inicial {idle:.0f} W: cierra otras cargas o elige un objetivo mayor.')
+        if stop.is_set():
+            return
+        messages.put(('status', 'Preparando CUDA; la duración comienza con la carga…'))
+        compute = Compute(uuid, mode, vram_mb)
+        folder = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GPU_Watts' / 'logs'
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f'{time.time_ns()}.csv'
+        messages.put(('log', str(path)))
+        output = path.open('w', newline='', encoding='utf-8')
+        writer = csv.writer(output)
+        writer.writerow(['seconds', 'target_w', 'board_average_w', 'core_c', 'vram_c', 'duty', 'limit_w', 'mode', 'allocated_vram_mb', 'vram_temperature_monitored', 'watched_process_present', 'process_cpu_percent', 'cutover_condition', 'phase'])
+        start = time.monotonic()
+        deadline = start + duration
+        sample_at = start
+        duty = 0.01
+        measured = idle
+        while not stop.is_set() and time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= sample_at:
+                temperatures = check_temperatures(sensors.read(), cutoffs, require_memory=getattr(sensors, 'monitor_vram', True))
+                messages.put(('temperatures', temperatures))
+                measured, temp, limit = telemetry.read(h)
+                process_present = bool(process) and process in {n.casefold() for n in process_names()}
+                counters = process_cpu_times(process) if process_present and trigger.uses_cpu else None
+                ready = False
+                if process:
+                    if adaptive is not None:
+                        duty, ready, description = adaptive.update(time.monotonic(),process_present,measured,duty,limit)
+                        trigger.present = process_present
+                        trigger.description = description
+                    else:
+                        ready = trigger.update(time.monotonic(),process_present,measured,counters)
+                if ready:
+                    detected = True
+                    reason = f'Relevo: {process} · {trigger.description}'
+                    samples.append(measured)
+                    writer.writerow([round(time.monotonic()-start,3), target, measured, *temperatures, round(duty,4), limit, mode, vram_mb if mode != 'Core' else 0, getattr(sensors,'monitor_vram',True), process_present, trigger.cpu_percent, trigger.mode, 'relevo'])
+                    output.flush()
+                    messages.put(('watch', trigger.description))
+                    break
+                if process:
+                    messages.put(('watch', trigger.description))
+                if temp >= cutoff:
+                    reason = f'Parada por temperatura: {temp} °C'
+                    break
+                if target > limit:
+                    reason = 'El límite de potencia del controlador ha bajado'
+                    break
+                # A software guard based on averaged readings, not a hardware wattage cap.
+                if not process_present and measured > max(target + 30, target * 1.35):
+                    reason = f'Parada por consumo medido elevado: {measured:.0f} W'
+                    break
+                samples.append(measured)
+                # Adaptive mode regulates support inside AdaptiveHandoff above.
+                # Legacy threshold modes freeze it while waiting for their trigger.
+                if not process_present:
+                    duty = next_duty(duty, target, measured, limit)
+                elapsed = now - start
+                writer.writerow([round(elapsed, 3), target, measured, *temperatures, round(duty, 4), limit, mode, vram_mb if mode != 'Core' else 0, getattr(sensors, 'monitor_vram', True), process_present, trigger.cpu_percent, trigger.mode if process else 'desactivado', 'carga'])
+                output.flush()
+                state = 'Objetivo fuera de alcance con esta carga' if duty >= 0.999 and measured < target - 10 else 'Ajustando carga'
+                if adaptive is not None:
+                    if process_present:
+                        state = 'Relevo adaptativo: ajustando nuestra aportación'
+                    elif abs(measured-target) <= max(10,target*.05):
+                        state = 'Base aproximada alcanzada; puedes iniciar el juego'
+                messages.put(('sample', (measured, temp, duty, max(0, deadline-now), state)))
+                sample_at = time.monotonic() + 0.5
+            if duty <= 0:
+                stop.wait(min(0.02, max(0, deadline-time.monotonic())))
+            else:
+                busy = compute.batch()
+                # Average duty control; individual kernels can still cause brief power peaks.
+                pause = min(0.1, busy * (1.0 / duty - 1.0))
+                stop.wait(min(pause, max(0, deadline-time.monotonic())))
+        if stop.is_set():
+            reason = 'Detenido por el usuario' 
+    except Exception as exc:
+        reason = f'Error: {exc}'
+    finally:
+        if compute is not None:
+            if ramp_seconds > 0 and duty > 0:
+                try:
+                    messages.put(('status', f'{reason} · iniciando retirada de {ramp_seconds:g} s'))
+                    def report_ramp(now, measured, temperatures, duty_now, limit_now):
+                        samples.append(measured)
+                        if writer is not None and output is not None and not output.closed:
+                            writer.writerow([round(now-start,3),target,measured,*temperatures,round(duty_now,4),limit_now,mode,vram_mb if mode != 'Core' else 0,getattr(sensors,'monitor_vram',True),trigger.present,trigger.cpu_percent,trigger.mode if process else 'desactivado','retirada gradual'])
+                            output.flush()
+                    # Ordinary stop/X/Esc requests cannot interrupt withdrawal.
+                    # Force-close terminates the OS process instead.
+                    ramp_down(compute,duty,ramp_seconds,telemetry,h,sensors,cutoffs,threading.Event(),messages,report_ramp)
+                except Exception as exc:
+                    reason += f' | No se pudo completar la retirada CUDA: {exc}'
+            try:
+                compute.close()
+            except Exception as exc:
+                reason += f' | Liberación CUDA: {exc}'
+        if output is not None:
+            try:
+                output.close()
+            except Exception as exc:
+                reason += f' | Registro: {exc}'
+        if samples:
+            messages.put(('summary', f'Máximo medido: {max(samples):.0f} W · última lectura: {samples[-1]:.0f} W · objetivo {target:.0f} W'))
+        messages.put(('done', reason))
+        if detected and close_on_process:
+            messages.put(('autoclose', True))
+
+
+def main():
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+    root = tk.Tk()
+    root.title('GPU Watts 1.0 · carga temporal NVIDIA')
+    root.geometry('800x830')
+    root.minsize(720, 550)
+    try:
+        telemetry = Telemetry()
+    except Exception as exc:
+        messagebox.showerror('GPU Watts', str(exc))
+        root.destroy()
+        return
+    canvas = tk.Canvas(root, highlightthickness=0)
+    scrollbar = ttk.Scrollbar(root, orient='vertical', command=canvas.yview)
+    scrollbar.pack(side='right', fill='y')
+    canvas.pack(side='left', fill='both', expand=True)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    box = ttk.Frame(canvas, padding=22)
+    window_id = canvas.create_window((0, 0), window=box, anchor='nw')
+    box.bind('<Configure>', lambda _: canvas.configure(scrollregion=canvas.bbox('all')))
+    canvas.bind('<Configure>', lambda e: canvas.itemconfigure(window_id, width=e.width))
+    root.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-int(e.delta/120), 'units'))
+    ttk.Label(box, text='GPU Watts', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
+    ttk.Label(box, text='Cálculo CUDA con regulación por consumo medio').pack(anchor='w', pady=(0, 14))
+    gpu = ttk.Combobox(box, state='readonly', values=[f'{i}: {v[1]}' for i, v in enumerate(telemetry.devices)])
+    gpu.current(0)
+    gpu.pack(fill='x')
+    fields = []
+    for label, default in [('Base de consumo TOTAL antes del juego (W)', '200'), ('Límite de carga antes de rampa (segundos)', '120'), ('Iniciar retirada si core alcanza (°C)', '75')]:
+        row = ttk.Frame(box)
+        row.pack(fill='x', pady=7)
+        ttk.Label(row, text=label).pack(side='left')
+        entry = ttk.Entry(row, width=12)
+        entry.insert(0, default)
+        entry.pack(side='right')
+        fields.append(entry)
+    mode_row = ttk.Frame(box)
+    mode_row.pack(fill='x', pady=5)
+    ttk.Label(mode_row, text='Carga').pack(side='left')
+    mode_box = ttk.Combobox(mode_row, state='readonly', values=['Core', 'VRAM', 'Mixto'], width=12)
+    mode_box.set('Core')
+    mode_box.pack(side='left', padx=12)
+    ttk.Label(mode_row, text='VRAM a recorrer (MiB, 64–4096)').pack(side='left')
+    vram_box = ttk.Entry(mode_row, width=8)
+    vram_box.insert(0, '512')
+    vram_box.pack(side='right')
+    for label, default in [('Iniciar retirada si VRAM alcanza (°C)', '85')]:
+        row = ttk.Frame(box)
+        row.pack(fill='x', pady=3)
+        ttk.Label(row, text=label).pack(side='left')
+        entry = ttk.Entry(row, width=12)
+        entry.insert(0, default)
+        entry.pack(side='right')
+        fields.append(entry)
+    source_row = ttk.Frame(box)
+    source_row.pack(fill='x', pady=6)
+    source_box = ttk.Combobox(source_row, state='readonly', values=['NVIDIA directo', 'CSV HWiNFO', 'NVIDIA solo core (sin vigilancia VRAM)'], width=39)
+    source_box.current(0)
+    source_box.pack(side='left')
+    csv_path = tk.StringVar()
+    column_boxes = []
+    def choose_csv():
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(filetypes=[('Registro CSV', '*.csv')])
+        if not path:
+            return
+        try:
+            _, _, headers = CsvSensors.inspect(path)
+            labels = [f'{i}: {name}' for i, name in enumerate(headers)]
+            for selector in column_boxes:
+                selector.configure(values=labels)
+                selector.set('')
+            csv_path.set(path)
+            source_box.set('CSV HWiNFO')
+            update_sensor_mode()
+            status.set('Selecciona core y VRAM de la GPU correcta, en °C.')
+        except Exception as exc:
+            messagebox.showerror('CSV', str(exc))
+    csv_button = ttk.Button(source_row, text='Elegir CSV activo…', command=choose_csv)
+    csv_button.pack(side='left', padx=10)
+    for label in ('Columna core', 'Columna VRAM'):
+        row = ttk.Frame(box)
+        row.pack(fill='x', pady=2)
+        ttk.Label(row, text=label, width=18).pack(side='left')
+        selector = ttk.Combobox(row, state='readonly')
+        selector.pack(side='right', fill='x', expand=True)
+        column_boxes.append(selector)
+    temperature_text = tk.StringVar(value='Core: —   VRAM: —')
+    ttk.Label(box, textvariable=temperature_text).pack(anchor='w', pady=5)
+    def update_sensor_mode(_=None):
+        only_core = source_box.current() == 2
+        fields[3].configure(state='disabled' if only_core else 'normal')
+        if only_core:
+            temperature_text.set('Solo core: VRAM NO VIGILADA; no hay parada por temperatura de memoria.')
+        else:
+            temperature_text.set('Core: —   VRAM: — (ambos necesarios en este modo)')
+    source_box.bind('<<ComboboxSelected>>', update_sensor_mode)
+    ttk.Label(box, text='Proceso para el relevo (vacío = desactivado):').pack(anchor='w', pady=(8, 3))
+    process_box = ttk.Combobox(box)
+    process_box.pack(fill='x')
+    def refresh_processes():
+        try:
+            process_box.configure(values=sorted(process_names(), key=str.casefold))
+        except Exception as exc:
+            messagebox.showerror('Procesos', str(exc))
+    process_box.configure(postcommand=refresh_processes)
+    trigger_box = ttk.Combobox(box, state='readonly', values=list(MODES))
+    trigger_box.set(ADAPTIVE_MODE)
+    trigger_box.pack(fill='x', pady=5)
+    trigger_fields = []
+    for label, default in [('Umbral GPU solo para modos clásicos (W)', '240'), ('CPU del proceso (% del equipo)', '10'), ('Mantener condición durante (s)', '2'), ('Espera inicial tras detectar proceso (s)', '2'), ('Suavidad de ajuste/retirada (s, 0,5–30)', '5')]:
+        row = ttk.Frame(box)
+        row.pack(fill='x', pady=2)
+        ttk.Label(row, text=label).pack(side='left')
+        entry = ttk.Entry(row, width=12)
+        entry.insert(0,default)
+        entry.pack(side='right')
+        trigger_fields.append(entry)
+    watch_text = tk.StringVar(value='Relevo: esperando configuración')
+    ttk.Label(box, textvariable=watch_text, wraplength=650).pack(anchor='w', pady=4)
+    ttk.Label(box, text='Adaptativo: mantiene la base antes de abrir el juego y reduce nuestra aportación\nsegún sube el consumo total. Si baja durante la carga, repone apoyo hasta el nivel previo.\nCierra cuando nuestra actividad es cero y el total sostiene al menos el 95% de la base.\nGPU es el total de la tarjeta; no son vatios medidos por proceso.\nParar, Esc, X y límites térmicos también retiran gradualmente. Solo Forzar es inmediato.', wraplength=650).pack(anchor='w')
+    close_on_process = tk.BooleanVar(value=True)
+    auto_close_box = ttk.Checkbutton(box, text='Cerrar también esta ventana al cumplirse el relevo', variable=close_on_process)
+    auto_close_box.pack(anchor='w', pady=5)
+    ttk.Label(box, text='Objetivo aproximado, NO un techo instantáneo. La lectura promedia ~1 segundo.\nLa carga empieza baja y sube; un pulso corto puede no alcanzar el objetivo.\nNo modifica voltajes, BIOS ni el límite de potencia del controlador.', wraplength=600).pack(anchor='w', pady=12)
+    reading = tk.StringVar(value='Sin carga')
+    status = tk.StringVar(value='Listo. Espera a alcanzar la base antes de abrir el juego. El relevo es aproximado.')
+    summary_text = tk.StringVar(value='')
+    ttk.Label(box, textvariable=summary_text, wraplength=650).pack(anchor='w')
+    logtext = tk.StringVar(value='')
+    ttk.Label(box, textvariable=reading, font=('Segoe UI', 15, 'bold')).pack(anchor='w', pady=7)
+    ttk.Label(box, textvariable=status, wraplength=600).pack(anchor='w')
+    ttk.Label(box, textvariable=logtext, wraplength=600).pack(anchor='w', pady=7)
+    stop, messages = threading.Event(), queue.Queue()
+    worker = None
+    closing = False
+    buttons = ttk.Frame(box)
+    buttons.pack(fill='x', pady=10)
+    def enable(running):
+        start_button.configure(state='disabled' if running else 'normal')
+        stop_button.configure(state='normal' if running else 'disabled')
+        gpu.configure(state='disabled' if running else 'readonly')
+        process_box.configure(state='disabled' if running else 'normal')
+        trigger_box.configure(state='disabled' if running else 'readonly')
+        for entry in trigger_fields:
+            entry.configure(state='disabled' if running else 'normal')
+        auto_close_box.configure(state='disabled' if running else 'normal')
+        mode_box.configure(state='disabled' if running else 'readonly')
+        source_box.configure(state='disabled' if running else 'readonly')
+        vram_box.configure(state='disabled' if running else 'normal')
+        csv_button.configure(state='disabled' if running else 'normal')
+        for selector in column_boxes:
+            selector.configure(state='disabled' if running else 'readonly')
+        for entry in fields:
+            entry.configure(state='disabled' if running else 'normal')
+        if not running:
+            update_sensor_mode()
+    def start():
+        nonlocal worker
+        try:
+            values = [float(e.get().replace(',', '.')) for e in fields]
+            validate(*values[:3])
+            if any(not math.isfinite(v) or not 45 <= v <= 100 for v in values[3:]):
+                raise ValueError('Límite VRAM: entre 45 y 100 °C.')
+            memory_mb = int(vram_box.get())
+            if not 64 <= memory_mb <= 4096:
+                raise ValueError('VRAM: entre 64 y 4096 MiB.')
+            source = None
+            if source_box.get() == 'CSV HWiNFO':
+                if not csv_path.get() or any(s.current() < 0 for s in column_boxes):
+                    raise ValueError('Elige un CSV activo y sus dos columnas de temperatura.')
+                source = CsvSensors(csv_path.get(), [s.current() for s in column_boxes])
+            else:
+                source = NativeSensors(telemetry, telemetry.devices[gpu.current()][0], monitor_vram=source_box.current() != 2)
+            watched = normalized_process(process_box.get())
+            trigger_values = [float(e.get().replace(',', '.')) for e in trigger_fields]
+            trigger = Cutover(trigger_box.get(), *trigger_values[:4]) if watched else None
+            ramp_seconds = trigger_values[4]
+            if not math.isfinite(ramp_seconds) or not .5 <= ramp_seconds <= 30:
+                raise ValueError('Retirada gradual: entre 0,5 y 30 segundos.')
+        except (ValueError, OSError, RuntimeError) as exc:
+            messagebox.showerror('Valores', str(exc))
+            return
+        stop.clear()
+        enable(True)
+        status.set('Preparando…')
+        summary_text.set('')
+        worker = threading.Thread(target=run_load, args=(telemetry, gpu.current(), *values[:3], stop, messages, watched, close_on_process.get(), source, *values[3:], mode_box.get(), memory_mb, trigger, ramp_seconds), daemon=True)
+        worker.start()
+    def halt():
+        stop.set()
+        status.set('Parada solicitada; retirando gradualmente la carga antes de liberar CUDA…')
+    start_button = ttk.Button(buttons, text='INICIAR', command=start)
+    start_button.pack(side='left', padx=(0, 10))
+    stop_button = ttk.Button(buttons, text='PARAR (Esc)', command=halt, state='disabled')
+    stop_button.pack(side='left')
+    ttk.Button(buttons, text='FORZAR CIERRE INMEDIATO', command=lambda: os._exit(0)).pack(side='right')
+    root.bind('<Escape>', lambda _: halt())
+    def close():
+        nonlocal closing
+        closing = True
+        halt()
+    root.protocol('WM_DELETE_WINDOW', close)
+    def poll():
+        while True:
+            try:
+                kind, value = messages.get_nowait()
+            except queue.Empty:
+                break
+            if kind == 'temperatures':
+                memory_text = f'{value[1]:.1f} °C' if value[1] is not None else 'NO VIGILADA'
+                temperature_text.set(f'Core: {value[0]:.1f} °C   VRAM: {memory_text}')
+            elif kind == 'autoclose':
+                close()
+            elif kind == 'sample':
+                watts, temp, duty, left, state = value
+                reading.set(f'{watts:.0f} W  ·  {temp} °C  ·  {left:.1f} s restantes')
+                status.set(f'{state} · actividad programada {duty*100:.0f}%')
+            elif kind == 'watch':
+                watch_text.set(value)
+            elif kind == 'summary':
+                summary_text.set(value)
+            elif kind == 'log':
+                logtext.set('CSV: ' + value)
+            else:
+                status.set(value)
+                if kind == 'done':
+                    reading.set('Sin carga generada por GPU Watts')
+                    enable(False)
+        if closing and (worker is None or not worker.is_alive()):
+            telemetry.shutdown()
+            root.destroy()
+            return
+        root.after(100, poll)
+    poll()
+    root.mainloop()
+
+
+if __name__ == '__main__':
+    main()
