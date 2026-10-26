@@ -81,6 +81,10 @@ OPCIÓN NVIDIA SOLO CORE (SIN VIGILANCIA VRAM)
 Si el controlador no facilita la temperatura de memoria, puedes seleccionar
 "NVIDIA solo core (sin vigilancia VRAM)" en el desplegable de fuente.
 Esta elección es manual: no se activa automáticamente si un sensor falla.
+(Cambio tras la 1.0) La fuente elegida se recuerda para la próxima vez: es un
+ajuste del PC, no de cada juego. En las GeForce el controlador normalmente no da
+la temperatura de la VRAM; si eliges «NVIDIA directo» y falta, el aviso dice
+que elijas «NVIDIA solo core» o «CSV HWiNFO».
 Solo lee el core y conserva su parada térmica; no consulta el hotspot ni la VRAM.
 Se muestra "VRAM NO VIGILADA" y se desactiva su límite de temperatura.
 Core, VRAM y Mixto siguen disponibles, pero no hay protección de este programa

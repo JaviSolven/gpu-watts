@@ -621,7 +621,9 @@ HELP = {
     'gpu': 'La tarjeta NVIDIA que se carga y se vigila.',
     'source': 'De dónde salen las temperaturas. NVIDIA directo: el controlador da core y VRAM. CSV HWiNFO: si el '
               'controlador no da la VRAM, HWiNFO puede escribir un CSV (registro cada 0,5–1 s) y se leen de ahí; '
-              'elige el CSV y sus dos columnas. Solo core: la VRAM no se vigila.',
+              'elige el CSV y sus dos columnas. Solo core: la VRAM no se vigila.\n\nEn las GeForce el controlador '
+              'normalmente no da la VRAM, así que «NVIDIA directo» falla: usa «solo core» o el CSV de HWiNFO. '
+              'Lo que elijas se recuerda para la próxima vez.',
     'core_c': 'Si el core de la GPU llega a esta temperatura, GPU Watts empieza a retirar su carga. Es un valor '
               'prudente de la aplicación, no un límite oficial.',
     'vram_c': 'Si la memoria de la GPU llega a esta temperatura, GPU Watts empieza a retirar su carga. Es un valor '
@@ -813,8 +815,10 @@ def main(simulate=False):
     label(section, 'Fuente de temperatura', 'source', 1, 0)
     source_row = ttk.Frame(section)
     source_row.grid(row=1, column=1, columnspan=3, sticky='ew', pady=4)
-    source_box = ttk.Combobox(source_row, state='readonly', values=['NVIDIA directo', 'CSV HWiNFO', 'NVIDIA solo core (sin vigilancia VRAM)'], width=36)
-    source_box.current(0)
+    sources = ['NVIDIA directo', 'CSV HWiNFO', 'NVIDIA solo core (sin vigilancia VRAM)']
+    source_box = ttk.Combobox(source_row, state='readonly', values=sources, width=36)
+    # A setting of this PC, not of a game: remembered between sessions.
+    source_box.set(store.prefs.get('source') if store.prefs.get('source') in sources else sources[0])
     source_box.pack(side='left')
     tip(source_box, texts['source'])
     csv_path = tk.StringVar()
@@ -832,7 +836,7 @@ def main(simulate=False):
                 selector.set('')
             csv_path.set(path)
             source_box.set('CSV HWiNFO')
-            update_sensor_mode()
+            choose_source()
             status.set('Selecciona core y VRAM de la GPU correcta, en °C.')
         except Exception as exc:
             messagebox.showerror('CSV', str(exc))
@@ -929,7 +933,13 @@ def main(simulate=False):
             temperature_text.set('Solo core: VRAM NO VIGILADA; no hay parada por temperatura de memoria.')
         else:
             temperature_text.set('Core: —   VRAM: — (ambos necesarios en este modo)')
-    source_box.bind('<<ComboboxSelected>>', update_sensor_mode)
+    def choose_source(_=None):
+        update_sensor_mode()
+        try:
+            store.set_pref('source', source_box.get())
+        except OSError as exc:
+            status.set(f'No se pudo recordar la fuente de temperatura: {exc}')
+    source_box.bind('<<ComboboxSelected>>', choose_source)
     def update_modes():
         update_load_mode()
         update_trigger_mode()

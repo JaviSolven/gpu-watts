@@ -71,6 +71,18 @@ class GameStoreTests(unittest.TestCase):
         again = games.GameStore(self.path)
         self.assertEqual(again.games, {})
         self.assertIsNone(again.last)
+    def test_temperature_source_is_remembered(self):
+        store = games.GameStore(self.path)
+        store.remember('steelnomad.exe', {})
+        store.set_pref('source', 'NVIDIA solo core (sin vigilancia VRAM)')
+        again = games.GameStore(self.path)
+        self.assertEqual(again.prefs['source'], 'NVIDIA solo core (sin vigilancia VRAM)')
+        self.assertEqual(again.ordered(), ['steelnomad.exe'])
+    def test_file_from_before_prefs_still_loads(self):
+        write(self.path, json.dumps({'games': {'steelnomad.exe': {'name': 'Steel Nomad', 'uses': 2, 'settings': {}}}, 'last': 'steelnomad.exe'}))
+        store = games.GameStore(self.path)
+        self.assertEqual(store.prefs, {})
+        self.assertEqual(store.last, 'steelnomad.exe')
     def test_missing_file_is_empty(self):
         self.assertEqual(games.GameStore(self.path).ordered(), [])
     def test_damaged_file_is_kept_aside_not_overwritten(self):

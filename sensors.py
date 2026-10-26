@@ -62,6 +62,10 @@ class NativeSensors:
                 # Reject a stale cached field when NVML supplies a timestamp.
                 if field.timestamp <= 0 or abs(time.time() - field.timestamp/1e6) > 5:
                     memory = None
+        if self.monitor_vram and memory is None:
+            # Usual on GeForce cards: the driver gives the core temperature only.
+            raise RuntimeError('Tu tarjeta no da la temperatura de la VRAM por «NVIDIA directo». Elige en el paso 4 '
+                               '«NVIDIA solo core» (sin vigilar la VRAM) o «CSV HWiNFO» para vigilarla con HWiNFO.')
         return check_temperatures((*temps, memory), require_memory=self.monitor_vram)
 
 

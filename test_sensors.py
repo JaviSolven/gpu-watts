@@ -79,6 +79,18 @@ class SensorTests(unittest.TestCase):
                 C.cast(ptr,C.POINTER(C.c_uint)).contents.value = 45
         sensors = NativeSensors(Telemetry(), None, monitor_vram=False)
         self.assertEqual(sensors.read(), (45, None))
+    def test_geforce_without_memory_temperature_says_what_to_choose(self):
+        class Fields:
+            def __call__(self, *_):
+                return 3  # NVML_ERROR_NOT_SUPPORTED, usual on GeForce
+        class Lib:
+            nvmlDeviceGetFieldValues = Fields()
+        class Telemetry:
+            lib = Lib()
+            def temp(self, h, sensor, ptr):
+                C.cast(ptr,C.POINTER(C.c_uint)).contents.value = 45
+        with self.assertRaisesRegex(RuntimeError, 'NVIDIA solo core'):
+            NativeSensors(Telemetry(), None).read()
     def test_missing_memory_requires_explicit_opt_out(self):
         with self.assertRaises(RuntimeError):
             check_temperatures((45,None), (75,85))

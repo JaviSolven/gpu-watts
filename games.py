@@ -15,10 +15,12 @@ def default_path():
 
 
 class GameStore:
-    """Games used before, keyed by executable name, most used first."""
+    """Games used before, keyed by executable name, most used first.
+
+    `prefs` holds settings of this PC rather than of a game (temperature source)."""
     def __init__(self, path=None):
         self.path = Path(path) if path else default_path()
-        self.games, self.last = {}, None
+        self.games, self.last, self.prefs = {}, None, {}
         try:
             data = json.loads(self.path.read_text(encoding='utf-8'))
             for exe, game in data['games'].items():
@@ -26,11 +28,12 @@ class GameStore:
                                    'settings': dict(game.get('settings', {}))}
             if data.get('last') in self.games:
                 self.last = data['last']
+            self.prefs = dict(data.get('prefs', {}))
         except FileNotFoundError:
             pass
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             # Unreadable file: keep a copy instead of overwriting it on the next save.
-            self.games, self.last = {}, None
+            self.games, self.last, self.prefs = {}, None, {}
             try:
                 self.path.replace(self.path.with_name(self.path.name + '.danado'))
             except OSError:
@@ -60,10 +63,15 @@ class GameStore:
             self.last = None
         self.save()
 
+    def set_pref(self, key, value):
+        if self.prefs.get(key) != value:
+            self.prefs[key] = value
+            self.save()
+
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(self.path.name + '.tmp')
-        temporary.write_text(json.dumps({'games': self.games, 'last': self.last}, ensure_ascii=False, indent=2), encoding='utf-8')
+        temporary.write_text(json.dumps({'games': self.games, 'last': self.last, 'prefs': self.prefs}, ensure_ascii=False, indent=2), encoding='utf-8')
         os.replace(temporary, self.path)
 
 
