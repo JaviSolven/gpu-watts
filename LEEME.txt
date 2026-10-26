@@ -242,3 +242,25 @@ picos de casi el máximo de la tarjeta. Ahora:
 PENDIENTE DE PROBAR EN LA RTX 5080: las pruebas simulan CUDA. Comprueba en el CSV y
 con HWiNFO que la base se alcanza y que el consumo baja de forma continua. La
 relación entre actividad y W ya no es la misma que en la 1.0.
+
+JUEGOS GUARDADOS Y STEAM (CAMBIO TRAS LA 1.0)
+Para no tener que elegir el proceso a toda prisa con el juego ya arrancando:
+- Fila «Juego» arriba del todo: lista de juegos ya usados, el más usado primero.
+  Al elegir uno se rellenan su .exe y los ajustes con los que lo usaste la última
+  vez (W, límite de carga, temperaturas, modo, VRAM, condición de relevo, espera,
+  suavidad y cierre automático). Las fuentes de temperatura y el CSV no se guardan.
+- Cada INICIAR con un proceso escrito guarda ese juego y sus ajustes. Si el juego
+  es nuevo, se añade a la lista.
+- Al abrir GPU Watts queda elegido el último juego usado.
+- Botón «Steam…»: lee la biblioteca de Steam de este equipo (todas las carpetas
+  de biblioteca), eliges el juego y te propone los .exe de su carpeta: el primero
+  suele ser el juego (el mayor que no es un ayudante); los de informes de error,
+  instaladores y antitrampas van al final. «Guardar y elegir» lo añade a la lista.
+- «Olvidar» quita el juego elegido de la lista.
+Steam no cambia el nombre del proceso: aunque el acceso directo apunte al número
+del juego en Steam, Steam arranca el .exe propio del juego, y ese es el que se
+vigila. Si un juego usa su propio lanzador, elige el .exe del juego, no el del
+lanzador. En caso de duda, abre el juego una vez y mira en el desplegable de
+«Proceso» qué nombre aparece.
+La lista se guarda en %LOCALAPPDATA%\GPU_Watts\juegos.json. Si ese fichero se
+estropea, se aparta como juegos.json.danado y se empieza con la lista vacía.

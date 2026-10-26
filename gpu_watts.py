@@ -10,6 +10,7 @@ import threading
 import time
 from sensors import NativeSensors, CsvSensors, check_temperatures
 from cutover import Cutover, MODES, read_cpu_times, AdaptiveHandoff, ADAPTIVE_MODE
+from games import GameStore, steam_games, game_executables
 
 P = C.c_void_p
 U = C.c_uint
@@ -591,6 +592,18 @@ def main():
     gpu = ttk.Combobox(box, state='readonly', values=[f'{i}: {v[1]}' for i, v in enumerate(telemetry.devices)])
     gpu.current(0)
     gpu.pack(fill='x')
+    store = GameStore()
+    saved_order = []
+    game_row = ttk.Frame(box)
+    game_row.pack(fill='x', pady=(10, 0))
+    ttk.Label(game_row, text='Juego').pack(side='left')
+    game_box = ttk.Combobox(game_row, state='readonly')
+    game_box.pack(side='left', fill='x', expand=True, padx=10)
+    steam_button = ttk.Button(game_row, text='Steam…')
+    steam_button.pack(side='left')
+    forget_button = ttk.Button(game_row, text='Olvidar')
+    forget_button.pack(side='left', padx=(6, 0))
+    ttk.Label(box, text='Elige el juego ANTES de abrirlo: carga su .exe y los ajustes con los que lo usaste. INICIAR los guarda.', wraplength=650).pack(anchor='w', pady=(3, 0))
     fields = []
     for label, default in [('Base de consumo TOTAL antes del juego (W)', '200'), ('Límite de carga antes de rampa (segundos)', '120'), ('Iniciar retirada si core alcanza (°C)', '75')]:
         row = ttk.Frame(box)
@@ -688,6 +701,114 @@ def main():
     close_on_process = tk.BooleanVar(value=True)
     auto_close_box = ttk.Checkbutton(box, text='Cerrar también esta ventana al cumplirse el relevo', variable=close_on_process)
     auto_close_box.pack(anchor='w', pady=5)
+    def current_settings():
+        # Kept as typed: they are validated again when INICIAR uses them.
+        return {'fields': [e.get() for e in fields], 'mode': mode_box.get(), 'vram_mb': vram_box.get(),
+                'trigger': trigger_box.get(), 'trigger_fields': [e.get() for e in trigger_fields],
+                'close': close_on_process.get()}
+    def apply_settings(saved):
+        def put(entry, value):
+            entry.configure(state='normal')
+            entry.delete(0, 'end')
+            entry.insert(0, str(value))
+        for entry, value in zip(fields, saved.get('fields', [])):
+            put(entry, value)
+        if saved.get('mode') in ('Core', 'VRAM', 'Mixto'):
+            mode_box.set(saved['mode'])
+        if 'vram_mb' in saved:
+            put(vram_box, saved['vram_mb'])
+        if saved.get('trigger') in MODES:
+            trigger_box.set(saved['trigger'])
+        for entry, value in zip(trigger_fields, saved.get('trigger_fields', [])):
+            put(entry, value)
+        if 'close' in saved:
+            close_on_process.set(bool(saved['close']))
+        update_sensor_mode()
+    def refresh_games(selected=None):
+        saved_order[:] = store.ordered()
+        game_box.configure(values=[f"{store.games[exe]['name']}  ·  {exe}" if store.games[exe]['name'] != exe else exe for exe in saved_order])
+        if selected in saved_order:
+            game_box.current(saved_order.index(selected))
+        else:
+            game_box.set('')
+    def choose_game(_=None):
+        if game_box.current() < 0:
+            return
+        exe = saved_order[game_box.current()]
+        game = store.games[exe]
+        process_box.set(exe)
+        if game['settings']:
+            apply_settings(game['settings'])
+            status.set(f"Ajustes de {game['name']} cargados. Pulsa INICIAR y después abre el juego.")
+        else:
+            status.set(f"{game['name']}: sin ajustes guardados todavía; se guardarán al pulsar INICIAR.")
+    game_box.bind('<<ComboboxSelected>>', choose_game)
+    def forget_game():
+        if game_box.current() < 0:
+            return
+        exe = saved_order[game_box.current()]
+        if messagebox.askyesno('Olvidar juego', f"¿Quitar {store.games[exe]['name']} de la lista y sus ajustes?"):
+            try:
+                store.forget(exe)
+            except OSError as exc:
+                messagebox.showerror('Juegos', f'No se pudo guardar la lista: {exc}')
+            refresh_games()
+    forget_button.configure(command=forget_game)
+    def open_steam():
+        try:
+            installed = steam_games()
+        except OSError as exc:
+            messagebox.showerror('Steam', f'No se pudo leer la biblioteca: {exc}')
+            return
+        if not installed:
+            messagebox.showinfo('Steam', 'No se encuentran juegos de Steam instalados en este equipo.')
+            return
+        dialog = tk.Toplevel(root)
+        dialog.title('Juegos de Steam')
+        dialog.geometry('620x460')
+        dialog.transient(root)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=14)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='1. Elige el juego').pack(anchor='w')
+        game_list = tk.Listbox(frame, height=9, exportselection=False)
+        game_list.pack(fill='both', expand=True)
+        for name, _ in installed:
+            game_list.insert('end', name)
+        ttk.Label(frame, text='2. Elige su .exe (el primero suele ser el juego; ayudantes y redistribuibles al final)').pack(anchor='w', pady=(10, 0))
+        exe_list = tk.Listbox(frame, height=6, exportselection=False)
+        exe_list.pack(fill='both', expand=True)
+        candidates = []
+        def show_executables(_=None):
+            exe_list.delete(0, 'end')
+            candidates.clear()
+            if not game_list.curselection():
+                return
+            folder = installed[game_list.curselection()[0]][1]
+            candidates.extend(game_executables(folder))
+            for name, size, path in candidates:
+                exe_list.insert('end', f'{name}   ({size/1048576:.0f} MB)   {path.parent.relative_to(folder)}')
+            if candidates:
+                exe_list.selection_set(0)
+            else:
+                exe_list.insert('end', 'No hay ningún .exe en su carpeta.')
+        game_list.bind('<<ListboxSelect>>', show_executables)
+        def use_selected():
+            if not game_list.curselection() or not exe_list.curselection() or not candidates:
+                messagebox.showinfo('Steam', 'Elige un juego y su .exe.', parent=dialog)
+                return
+            exe = normalized_process(candidates[exe_list.curselection()[0]][0])
+            name = installed[game_list.curselection()[0]][0]
+            try:
+                store.add(exe, name)
+            except OSError as exc:
+                messagebox.showerror('Juegos', f'No se pudo guardar la lista: {exc}', parent=dialog)
+                return
+            dialog.destroy()
+            refresh_games(exe)
+            choose_game()
+        ttk.Button(frame, text='Guardar y elegir', command=use_selected).pack(anchor='e', pady=(10, 0))
+    steam_button.configure(command=open_steam)
     ttk.Label(box, text='Objetivo aproximado, NO un techo instantáneo. La lectura promedia ~1 segundo.\nLa carga empieza baja y sube; un pulso corto puede no alcanzar el objetivo.\nNo modifica voltajes, BIOS ni el límite de potencia del controlador.', wraplength=600).pack(anchor='w', pady=12)
     reading = tk.StringVar(value='Sin carga')
     status = tk.StringVar(value='Listo. Espera a alcanzar la base antes de abrir el juego. El relevo es aproximado.')
@@ -706,6 +827,9 @@ def main():
         start_button.configure(state='disabled' if running else 'normal')
         stop_button.configure(state='normal' if running else 'disabled')
         gpu.configure(state='disabled' if running else 'readonly')
+        game_box.configure(state='disabled' if running else 'readonly')
+        steam_button.configure(state='disabled' if running else 'normal')
+        forget_button.configure(state='disabled' if running else 'normal')
         process_box.configure(state='disabled' if running else 'normal')
         trigger_box.configure(state='disabled' if running else 'readonly')
         for entry in trigger_fields:
@@ -751,6 +875,12 @@ def main():
         enable(True)
         status.set('Preparando…')
         summary_text.set('')
+        if watched:
+            try:
+                store.remember(watched, current_settings())
+                refresh_games(watched)
+            except OSError as exc:
+                summary_text.set(f'No se pudieron guardar los ajustes del juego: {exc}')
         worker = threading.Thread(target=run_load, args=(telemetry, gpu.current(), *values[:3], stop, messages, watched, close_on_process.get(), source, *values[3:], mode_box.get(), memory_mb, trigger, ramp_seconds), daemon=True)
         worker.start()
     def halt():
@@ -798,6 +928,9 @@ def main():
             root.destroy()
             return
         root.after(100, poll)
+    # Open ready for the last game used.
+    refresh_games(store.last)
+    choose_game()
     poll()
     root.mainloop()
 
