@@ -586,12 +586,58 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
             messages.put(('autoclose', True))
 
 
+HELP = {
+    'game': 'Tus juegos guardados, el más usado primero. Al elegir uno se rellenan su ejecutable y los ajustes '
+            'con los que lo usaste la última vez. Cada INICIAR guarda los ajustes del juego.',
+    'steam': 'Añade un juego de tu biblioteca de Steam sin tener que abrirlo: eliges el juego y su .exe.',
+    'forget': 'Quita de la lista el juego elegido, con sus ajustes.',
+    'process': 'El .exe del juego que GPU Watts espera ver aparecer para hacer el relevo. Se rellena al elegir un '
+               'juego de la lista; también puedes escribirlo o elegirlo en el desplegable con el juego abierto. '
+               'Aunque lo abras desde Steam, Steam arranca este mismo .exe. Vacío = sin relevo: solo carga '
+               'durante el tiempo máximo.',
+    'base': 'Consumo TOTAL de la tarjeta que se mantiene antes de abrir el juego, en W. No son W de más: incluye '
+            'el escritorio y todo lo demás. Es una media aproximada (la lectura promedia ~1 s), no un techo '
+            'instantáneo.',
+    'smooth': 'Lo despacio que GPU Watts quita (y repone) su carga. Con 5 s, retirar toda la carga lleva al menos '
+              '5 s. Más alto = más suave, pero el relevo dura más. También se usa al pulsar PARAR.',
+    'duration': 'Si el relevo no ha terminado en este tiempo, contado desde INICIAR, GPU Watts retira su carga '
+                'igualmente y para. Súbelo si tardas en abrir el juego.',
+    'mode': 'Core: cálculo puro (lo normal). VRAM: lee y escribe memoria de vídeo. Mixto: alterna los dos.',
+    'vram_mb': 'Solo para VRAM y Mixto: tamaño del bloque de memoria que se recorre, 64–4096 MiB. Siempre deja al '
+               'menos 1 GiB libre. Es carga, no una prueba de la memoria.',
+    'trigger': 'Relevo adaptativo (recomendado): mantiene la base hasta que aparece el juego; después va quitando '
+               'su carga a medida que el juego consume, y vuelve a ayudar si el consumo cae. Termina cuando su '
+               'carga es cero y la tarjeta se sostiene sola al 95 % de la base.\n\nModos clásicos: congelan la '
+               'carga al aparecer el juego y esperan a que se cumpla un umbral de W o de CPU.',
+    'grace': 'Segundos desde que aparece el juego antes de poder dar el relevo por terminado. Evita cerrar en el '
+             'primer instante.',
+    'hold': 'Tiempo seguido que debe cumplirse la condición para dar el relevo por bueno. En el adaptativo: sin '
+            'carga propia y la tarjeta al 95 % de la base. Si falla, la cuenta empieza de nuevo.',
+    'gpu_w': 'Solo modos clásicos: consumo TOTAL de la tarjeta a partir del cual se da el relevo. Tiene que '
+             'superar la base al menos un 10 % o 10 W.',
+    'cpu': 'Solo modos clásicos: uso de CPU del juego, en % del equipo entero, a partir del cual se da el relevo. '
+           'Con 16 hilos, un hilo al 100 % es ~6 %.',
+    'close': 'Al terminar el relevo, GPU Watts se cierra solo. Si no se cierra, el estado dice por qué paró.',
+    'gpu': 'La tarjeta NVIDIA que se carga y se vigila.',
+    'source': 'De dónde salen las temperaturas. NVIDIA directo: el controlador da core y VRAM. CSV HWiNFO: si el '
+              'controlador no da la VRAM, HWiNFO puede escribir un CSV (registro cada 0,5–1 s) y se leen de ahí; '
+              'elige el CSV y sus dos columnas. Solo core: la VRAM no se vigila.',
+    'core_c': 'Si el core de la GPU llega a esta temperatura, GPU Watts empieza a retirar su carga. Es un valor '
+              'prudente de la aplicación, no un límite oficial.',
+    'vram_c': 'Si la memoria de la GPU llega a esta temperatura, GPU Watts empieza a retirar su carga. Es un valor '
+              'prudente de la aplicación, no un límite oficial.',
+    'start': 'Empieza a subir la carga hacia la base. Espera a «Base aproximada alcanzada» y entonces abre el juego.',
+    'stop': 'Retira la carga poco a poco (según la Suavidad) y para. También con Esc o cerrando la ventana.',
+    'force': 'Cierra al instante, sin retirada gradual. Solo si algo va mal.',
+}
+
+
 def main(simulate=False):
     import tkinter as tk
     from tkinter import ttk, messagebox
     root = tk.Tk()
-    root.geometry('800x830')
-    root.minsize(720, 550)
+    root.geometry('1080x780')
+    root.minsize(920, 560)
     if not simulate:
         try:
             telemetry = Telemetry()
@@ -605,96 +651,159 @@ def main(simulate=False):
     if simulate:
         telemetry = SimulatedGpu()
     root.title('GPU Watts 1.0 · SIMULACIÓN (no carga ninguna tarjeta)' if simulate else 'GPU Watts 1.0 · carga temporal NVIDIA')
+    style = ttk.Style(root)
+    style.configure('Step.TLabelframe.Label', font=('Segoe UI', 11, 'bold'))
+    style.configure('Big.TButton', font=('Segoe UI', 12, 'bold'), padding=(18, 8))
+    style.configure('Hint.TLabel', foreground='#555555')
     canvas = tk.Canvas(root, highlightthickness=0)
     scrollbar = ttk.Scrollbar(root, orient='vertical', command=canvas.yview)
     scrollbar.pack(side='right', fill='y')
     canvas.pack(side='left', fill='both', expand=True)
     canvas.configure(yscrollcommand=scrollbar.set)
-    box = ttk.Frame(canvas, padding=22)
+    box = ttk.Frame(canvas, padding=18)
     window_id = canvas.create_window((0, 0), window=box, anchor='nw')
     box.bind('<Configure>', lambda _: canvas.configure(scrollregion=canvas.bbox('all')))
     canvas.bind('<Configure>', lambda e: canvas.itemconfigure(window_id, width=e.width))
     root.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-int(e.delta/120), 'units'))
-    ttk.Label(box, text='GPU Watts', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
-    ttk.Label(box, text='Cálculo CUDA con regulación por consumo medio').pack(anchor='w', pady=(0, 14))
-    if simulate:
-        sim_box = ttk.LabelFrame(box, text='MODO SIMULACIÓN', padding=10)
-        sim_box.pack(fill='x', pady=(0, 14))
-        ttk.Label(sim_box, foreground='#b00020', wraplength=650, text='Tarjeta, W, temperaturas y juego son de mentira: sirve para ver y probar el panel. '
-                  'Pulsa INICIAR, espera a la base y abre el juego simulado con el proceso elegido abajo.').pack(anchor='w')
-        sim_row = ttk.Frame(sim_box)
-        sim_row.pack(fill='x', pady=(8, 0))
-        ttk.Label(sim_row, text='W del juego').pack(side='left')
-        sim_watts = ttk.Entry(sim_row, width=6)
-        sim_watts.insert(0, '300')
-        sim_watts.pack(side='left', padx=(6, 12))
-        sim_text = tk.StringVar(value='Juego simulado cerrado.')
-        def open_sim_game():
-            try:
-                exe = normalized_process(process_box.get())
-                watts = float(sim_watts.get().replace(',', '.'))
-                if not exe:
-                    raise ValueError('Elige o escribe primero el proceso del juego.')
-                if not math.isfinite(watts) or not 40 <= watts <= 340:
-                    raise ValueError('W del juego simulado: entre 40 y 340.')
-            except ValueError as exc:
-                messagebox.showerror('Simulación', str(exc))
-                return
-            telemetry.open_game(exe, watts)
-            sim_text.set(f'Juego simulado abierto: {exe} · pantalla de carga 6 s, luego ~{watts:.0f} W.')
-        def close_sim_game():
-            telemetry.close_game()
-            sim_text.set('Juego simulado cerrado.')
-        ttk.Button(sim_row, text='Abrir juego simulado', command=open_sim_game).pack(side='left')
-        ttk.Button(sim_row, text='Cerrar juego simulado', command=close_sim_game).pack(side='left', padx=6)
-        ttk.Label(sim_box, textvariable=sim_text).pack(anchor='w', pady=(6, 0))
-    gpu = ttk.Combobox(box, state='readonly', values=[f'{i}: {v[1]}' for i, v in enumerate(telemetry.devices)])
-    gpu.current(0)
-    gpu.pack(fill='x')
+
+    def tip(widget, text):
+        """Explanation shown while the mouse rests on the widget."""
+        state = {'window': None, 'job': None}
+        def show():
+            state['job'] = None
+            window = tk.Toplevel(widget)
+            window.wm_overrideredirect(True)
+            window.attributes('-topmost', True)
+            window.geometry(f'+{widget.winfo_rootx()+10}+{widget.winfo_rooty()+widget.winfo_height()+4}')
+            tk.Label(window, text=text, justify='left', wraplength=420, background='#ffffe1', foreground='#000000',
+                     relief='solid', borderwidth=1, padx=8, pady=6, font=('Segoe UI', 9)).pack()
+            state['window'] = window
+        def enter(_):
+            if state['job'] is None and state['window'] is None:
+                state['job'] = widget.after(350, show)
+        def leave(_):
+            if state['job'] is not None:
+                widget.after_cancel(state['job'])
+                state['job'] = None
+            if state['window'] is not None:
+                state['window'].destroy()
+                state['window'] = None
+        widget.bind('<Enter>', enter, add='+')
+        widget.bind('<Leave>', leave, add='+')
+        widget.bind('<ButtonPress>', leave, add='+')
+    def step(parent, title):
+        frame = ttk.LabelFrame(parent, text=title, padding=(12, 8), style='Step.TLabelframe')
+        frame.pack(fill='x', pady=(0, 12))
+        return frame
+    def label(parent, text, key, row, column):
+        widget = ttk.Label(parent, text=f'{text}  ⓘ')
+        widget.grid(row=row, column=column, sticky='w', padx=(0 if column == 0 else 22, 8), pady=4)
+        tip(widget, HELP[key])
+        return widget
+    def field(parent, text, key, default, row, column=0, width=8):
+        name = label(parent, text, key, row, column)
+        entry = ttk.Entry(parent, width=width)
+        entry.insert(0, default)
+        entry.grid(row=row, column=column+1, sticky='w', pady=4)
+        tip(entry, HELP[key])
+        return name, entry
+
+    header = ttk.Frame(box)
+    header.pack(fill='x')
+    ttk.Label(header, text='GPU Watts', font=('Segoe UI', 22, 'bold')).pack(side='left')
+    ttk.Label(header, text='Sube la tarjeta a una base antes del juego y se retira cuando el juego coge el consumo.',
+              style='Hint.TLabel').pack(side='left', padx=14, pady=(10, 0))
+    ttk.Label(box, text='Cómo se usa:   1. Elige el juego   →   2. Pulsa INICIAR   →   3. Con «Base aproximada alcanzada», abre el juego.',
+              font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(4, 14))
+    columns = ttk.Frame(box)
+    columns.pack(fill='both', expand=True)
+    left = ttk.Frame(columns)
+    left.pack(side='left', fill='both', expand=True)
+    right = ttk.Frame(columns, width=380)
+    right.pack(side='left', fill='y', padx=(18, 0))
+
+    # 1 · Juego
     store = GameStore()
     saved_order = []
-    game_row = ttk.Frame(box)
-    game_row.pack(fill='x', pady=(10, 0))
-    ttk.Label(game_row, text='Juego').pack(side='left')
+    section = step(left, '1 · Juego')
+    section.columnconfigure(1, weight=1)
+    label(section, 'Juego guardado', 'game', 0, 0)
+    game_row = ttk.Frame(section)
+    game_row.grid(row=0, column=1, sticky='ew', pady=4)
     game_box = ttk.Combobox(game_row, state='readonly')
-    game_box.pack(side='left', fill='x', expand=True, padx=10)
+    game_box.pack(side='left', fill='x', expand=True)
+    tip(game_box, HELP['game'])
     steam_button = ttk.Button(game_row, text='Steam…')
-    steam_button.pack(side='left')
+    steam_button.pack(side='left', padx=(8, 0))
+    tip(steam_button, HELP['steam'])
     forget_button = ttk.Button(game_row, text='Olvidar')
     forget_button.pack(side='left', padx=(6, 0))
-    ttk.Label(box, text='Elige el juego ANTES de abrirlo: carga su .exe y los ajustes con los que lo usaste. INICIAR los guarda.', wraplength=650).pack(anchor='w', pady=(3, 0))
-    fields = []
-    for label, default in [('Base de consumo TOTAL antes del juego (W)', '200'), ('Límite de carga antes de rampa (segundos)', '120'), ('Iniciar retirada si core alcanza (°C)', '75')]:
-        row = ttk.Frame(box)
-        row.pack(fill='x', pady=7)
-        ttk.Label(row, text=label).pack(side='left')
-        entry = ttk.Entry(row, width=12)
-        entry.insert(0, default)
-        entry.pack(side='right')
-        fields.append(entry)
-    mode_row = ttk.Frame(box)
-    mode_row.pack(fill='x', pady=5)
-    ttk.Label(mode_row, text='Carga').pack(side='left')
-    mode_box = ttk.Combobox(mode_row, state='readonly', values=['Core', 'VRAM', 'Mixto'], width=12)
+    tip(forget_button, HELP['forget'])
+    label(section, 'Ejecutable vigilado', 'process', 1, 0)
+    process_box = ttk.Combobox(section)
+    process_box.grid(row=1, column=1, sticky='ew', pady=4)
+    tip(process_box, HELP['process'])
+    def refresh_processes():
+        try:
+            process_box.configure(values=sorted(process_names(), key=str.casefold))
+        except Exception as exc:
+            messagebox.showerror('Procesos', str(exc))
+    process_box.configure(postcommand=refresh_processes)
+
+    # 2 · Precarga
+    section = step(left, '2 · Precarga antes del juego')
+    _, base_entry = field(section, 'Base de consumo (W)', 'base', '200', 0)
+    _, smooth_entry = field(section, 'Suavidad (s, 0,5–30)', 'smooth', '5', 0, 2)
+    _, duration_entry = field(section, 'Tiempo máximo (s)', 'duration', '120', 1)
+    label(section, 'Tipo de carga', 'mode', 1, 2)
+    mode_box = ttk.Combobox(section, state='readonly', values=['Core', 'VRAM', 'Mixto'], width=8)
     mode_box.set('Core')
-    mode_box.pack(side='left', padx=12)
-    ttk.Label(mode_row, text='VRAM a recorrer (MiB, 64–4096)').pack(side='left')
-    vram_box = ttk.Entry(mode_row, width=8)
-    vram_box.insert(0, '512')
-    vram_box.pack(side='right')
-    for label, default in [('Iniciar retirada si VRAM alcanza (°C)', '85')]:
-        row = ttk.Frame(box)
-        row.pack(fill='x', pady=3)
-        ttk.Label(row, text=label).pack(side='left')
-        entry = ttk.Entry(row, width=12)
-        entry.insert(0, default)
-        entry.pack(side='right')
-        fields.append(entry)
-    source_row = ttk.Frame(box)
-    source_row.pack(fill='x', pady=6)
-    source_box = ttk.Combobox(source_row, state='readonly', values=['NVIDIA directo', 'CSV HWiNFO', 'NVIDIA solo core (sin vigilancia VRAM)'], width=39)
+    mode_box.grid(row=1, column=3, sticky='w', pady=4)
+    tip(mode_box, HELP['mode'])
+    _, vram_box = field(section, 'VRAM a recorrer (MiB)', 'vram_mb', '512', 2, 2)
+    def update_load_mode(_=None):
+        if str(mode_box.cget('state')) != 'disabled':
+            vram_box.configure(state='disabled' if mode_box.get() == 'Core' else 'normal')
+    mode_box.bind('<<ComboboxSelected>>', update_load_mode)
+
+    # 3 · Relevo
+    section = step(left, '3 · Relevo al juego')
+    section.columnconfigure(3, weight=1)
+    label(section, 'Cómo decide el relevo', 'trigger', 0, 0)
+    trigger_box = ttk.Combobox(section, state='readonly', values=list(MODES))
+    trigger_box.set(ADAPTIVE_MODE)
+    trigger_box.grid(row=0, column=1, columnspan=3, sticky='ew', pady=4)
+    tip(trigger_box, HELP['trigger'])
+    _, grace_entry = field(section, 'Espera inicial (s)', 'grace', '2', 1)
+    _, hold_entry = field(section, 'Confirmar durante (s)', 'hold', '2', 1, 2)
+    classic = [*field(section, 'Umbral GPU (W)', 'gpu_w', '240', 2), *field(section, 'CPU del juego (%)', 'cpu', '10', 2, 2)]
+    gpu_w_entry, cpu_entry = classic[1], classic[3]
+    close_on_process = tk.BooleanVar(value=True)
+    auto_close_box = ttk.Checkbutton(section, text='Cerrar GPU Watts al terminar el relevo  ⓘ', variable=close_on_process)
+    auto_close_box.grid(row=3, column=0, columnspan=4, sticky='w', pady=(6, 0))
+    tip(auto_close_box, HELP['close'])
+    def update_trigger_mode(_=None):
+        for widget in classic:
+            if trigger_box.get() == ADAPTIVE_MODE:
+                widget.grid_remove()
+            else:
+                widget.grid()
+    trigger_box.bind('<<ComboboxSelected>>', update_trigger_mode)
+
+    # 4 · Tarjeta y temperaturas
+    section = step(left, '4 · Tarjeta y temperaturas')
+    section.columnconfigure(1, weight=1)
+    label(section, 'Tarjeta', 'gpu', 0, 0)
+    gpu = ttk.Combobox(section, state='readonly', values=[f'{i}: {v[1]}' for i, v in enumerate(telemetry.devices)])
+    gpu.current(0)
+    gpu.grid(row=0, column=1, columnspan=3, sticky='ew', pady=4)
+    label(section, 'Fuente de temperatura', 'source', 1, 0)
+    source_row = ttk.Frame(section)
+    source_row.grid(row=1, column=1, columnspan=3, sticky='ew', pady=4)
+    source_box = ttk.Combobox(source_row, state='readonly', values=['NVIDIA directo', 'CSV HWiNFO', 'NVIDIA solo core (sin vigilancia VRAM)'], width=36)
     source_box.current(0)
     source_box.pack(side='left')
+    tip(source_box, HELP['source'])
     csv_path = tk.StringVar()
     column_boxes = []
     def choose_csv():
@@ -715,51 +824,95 @@ def main(simulate=False):
         except Exception as exc:
             messagebox.showerror('CSV', str(exc))
     csv_button = ttk.Button(source_row, text='Elegir CSV activo…', command=choose_csv)
-    csv_button.pack(side='left', padx=10)
-    for label in ('Columna core', 'Columna VRAM'):
-        row = ttk.Frame(box)
-        row.pack(fill='x', pady=2)
-        ttk.Label(row, text=label, width=18).pack(side='left')
-        selector = ttk.Combobox(row, state='readonly')
-        selector.pack(side='right', fill='x', expand=True)
+    csv_widgets = []
+    for row, text in ((2, 'Columna core del CSV'), (3, 'Columna VRAM del CSV')):
+        name = ttk.Label(section, text=text)
+        name.grid(row=row, column=0, sticky='w', pady=2)
+        selector = ttk.Combobox(section, state='readonly')
+        selector.grid(row=row, column=1, columnspan=3, sticky='ew', pady=2)
         column_boxes.append(selector)
+        csv_widgets += [name, selector]
+    core_name, core_entry = field(section, 'Retirar si core llega a (°C)', 'core_c', '75', 4)
+    _, vram_c_entry = field(section, 'Retirar si VRAM llega a (°C)', 'vram_c', '85', 4, 2)
+    # Same order as before the redesign: saved games keep their settings.
+    fields = [base_entry, duration_entry, core_entry, vram_c_entry]
+    trigger_fields = [gpu_w_entry, cpu_entry, hold_entry, grace_entry, smooth_entry]
+
+    # Right column: simulation, buttons and state.
+    if simulate:
+        sim_box = ttk.LabelFrame(right, text='MODO SIMULACIÓN', padding=10)
+        sim_box.pack(fill='x', pady=(0, 12))
+        ttk.Label(sim_box, foreground='#b00020', wraplength=340, text='Tarjeta, W, temperaturas y juego son de mentira. '
+                  'Pulsa INICIAR, espera a la base y abre el juego simulado (usa el ejecutable del paso 1).').pack(anchor='w')
+        sim_row = ttk.Frame(sim_box)
+        sim_row.pack(fill='x', pady=(8, 0))
+        ttk.Label(sim_row, text='W del juego').pack(side='left')
+        sim_watts = ttk.Entry(sim_row, width=6)
+        sim_watts.insert(0, '300')
+        sim_watts.pack(side='left', padx=(6, 0))
+        sim_buttons = ttk.Frame(sim_box)
+        sim_buttons.pack(fill='x', pady=(8, 0))
+        sim_text = tk.StringVar(value='Juego simulado cerrado.')
+        def open_sim_game():
+            try:
+                exe = normalized_process(process_box.get())
+                watts = float(sim_watts.get().replace(',', '.'))
+                if not exe:
+                    raise ValueError('Elige o escribe primero el ejecutable del juego (paso 1).')
+                if not math.isfinite(watts) or not 40 <= watts <= 340:
+                    raise ValueError('W del juego simulado: entre 40 y 340.')
+            except ValueError as exc:
+                messagebox.showerror('Simulación', str(exc))
+                return
+            telemetry.open_game(exe, watts)
+            sim_text.set(f'Abierto: {exe} · 6 s de carga, luego ~{watts:.0f} W.')
+        def close_sim_game():
+            telemetry.close_game()
+            sim_text.set('Juego simulado cerrado.')
+        ttk.Button(sim_buttons, text='Abrir juego simulado', command=open_sim_game).pack(side='left')
+        ttk.Button(sim_buttons, text='Cerrar juego simulado', command=close_sim_game).pack(side='left', padx=6)
+        ttk.Label(sim_box, textvariable=sim_text, wraplength=340).pack(anchor='w', pady=(6, 0))
+    buttons = ttk.Frame(right)
+    buttons.pack(fill='x', pady=(0, 12))
+    state_box = ttk.LabelFrame(right, text='Estado', padding=(12, 8), style='Step.TLabelframe')
+    state_box.pack(fill='both', expand=True)
+    reading = tk.StringVar(value='Sin carga')
     temperature_text = tk.StringVar(value='Core: —   VRAM: —')
-    ttk.Label(box, textvariable=temperature_text).pack(anchor='w', pady=5)
+    status = tk.StringVar(value='Listo. Elige el juego y pulsa INICIAR.')
+    watch_text = tk.StringVar(value='')
+    summary_text = tk.StringVar(value='')
+    logtext = tk.StringVar(value='')
+    ttk.Label(state_box, textvariable=reading, font=('Segoe UI', 15, 'bold'), wraplength=340).pack(anchor='w')
+    ttk.Label(state_box, textvariable=temperature_text, wraplength=340).pack(anchor='w', pady=(4, 8))
+    ttk.Label(state_box, textvariable=status, wraplength=340).pack(anchor='w')
+    ttk.Label(state_box, textvariable=watch_text, wraplength=340).pack(anchor='w', pady=(8, 0))
+    ttk.Label(state_box, textvariable=summary_text, wraplength=340).pack(anchor='w', pady=(8, 0))
+    ttk.Label(state_box, textvariable=logtext, wraplength=340, style='Hint.TLabel').pack(anchor='w', pady=(8, 0))
+    ttk.Label(right, text='Los W son una media aproximada (~1 s), no un techo instantáneo. GPU Watts no toca voltajes, BIOS ni el límite de potencia.',
+              wraplength=360, style='Hint.TLabel').pack(anchor='w', pady=(10, 0))
+
     def update_sensor_mode(_=None):
         only_core = source_box.current() == 2
-        fields[3].configure(state='disabled' if only_core else 'normal')
+        csv = source_box.get() == 'CSV HWiNFO'
+        if str(source_box.cget('state')) != 'disabled':
+            vram_c_entry.configure(state='disabled' if only_core else 'normal')
+        if csv:
+            csv_button.pack(side='left', padx=10)
+            for widget in csv_widgets:
+                widget.grid()
+        else:
+            csv_button.pack_forget()
+            for widget in csv_widgets:
+                widget.grid_remove()
         if only_core:
             temperature_text.set('Solo core: VRAM NO VIGILADA; no hay parada por temperatura de memoria.')
         else:
             temperature_text.set('Core: —   VRAM: — (ambos necesarios en este modo)')
     source_box.bind('<<ComboboxSelected>>', update_sensor_mode)
-    ttk.Label(box, text='Proceso para el relevo (vacío = desactivado):').pack(anchor='w', pady=(8, 3))
-    process_box = ttk.Combobox(box)
-    process_box.pack(fill='x')
-    def refresh_processes():
-        try:
-            process_box.configure(values=sorted(process_names(), key=str.casefold))
-        except Exception as exc:
-            messagebox.showerror('Procesos', str(exc))
-    process_box.configure(postcommand=refresh_processes)
-    trigger_box = ttk.Combobox(box, state='readonly', values=list(MODES))
-    trigger_box.set(ADAPTIVE_MODE)
-    trigger_box.pack(fill='x', pady=5)
-    trigger_fields = []
-    for label, default in [('Umbral GPU solo para modos clásicos (W)', '240'), ('CPU del proceso (% del equipo)', '10'), ('Mantener condición durante (s)', '2'), ('Espera inicial tras detectar proceso (s)', '2'), ('Suavidad de ajuste/retirada (s, 0,5–30)', '5')]:
-        row = ttk.Frame(box)
-        row.pack(fill='x', pady=2)
-        ttk.Label(row, text=label).pack(side='left')
-        entry = ttk.Entry(row, width=12)
-        entry.insert(0,default)
-        entry.pack(side='right')
-        trigger_fields.append(entry)
-    watch_text = tk.StringVar(value='Relevo: esperando configuración')
-    ttk.Label(box, textvariable=watch_text, wraplength=650).pack(anchor='w', pady=4)
-    ttk.Label(box, text='Adaptativo: mantiene la base antes de abrir el juego y reduce nuestra aportación\nsegún sube el consumo total. Si baja durante la carga, repone apoyo hasta el nivel previo.\nCierra cuando nuestra actividad es cero y el total sostiene al menos el 95% de la base.\nGPU es el total de la tarjeta; no son vatios medidos por proceso.\nParar, Esc, X y límites térmicos también retiran gradualmente. Solo Forzar es inmediato.', wraplength=650).pack(anchor='w')
-    close_on_process = tk.BooleanVar(value=True)
-    auto_close_box = ttk.Checkbutton(box, text='Cerrar también esta ventana al cumplirse el relevo', variable=close_on_process)
-    auto_close_box.pack(anchor='w', pady=5)
+    def update_modes():
+        update_load_mode()
+        update_trigger_mode()
+        update_sensor_mode()
     def current_settings():
         # Kept as typed: they are validated again when INICIAR uses them.
         return {'fields': [e.get() for e in fields], 'mode': mode_box.get(), 'vram_mb': vram_box.get(),
@@ -782,7 +935,7 @@ def main(simulate=False):
             put(entry, value)
         if 'close' in saved:
             close_on_process.set(bool(saved['close']))
-        update_sensor_mode()
+        update_modes()
     def refresh_games(selected=None):
         saved_order[:] = store.ordered()
         game_box.configure(values=[f"{store.games[exe]['name']}  ·  {exe}" if store.games[exe]['name'] != exe else exe for exe in saved_order])
@@ -868,20 +1021,9 @@ def main(simulate=False):
             choose_game()
         ttk.Button(frame, text='Guardar y elegir', command=use_selected).pack(anchor='e', pady=(10, 0))
     steam_button.configure(command=open_steam)
-    ttk.Label(box, text='Objetivo aproximado, NO un techo instantáneo. La lectura promedia ~1 segundo.\nLa carga empieza baja y sube; un pulso corto puede no alcanzar el objetivo.\nNo modifica voltajes, BIOS ni el límite de potencia del controlador.', wraplength=600).pack(anchor='w', pady=12)
-    reading = tk.StringVar(value='Sin carga')
-    status = tk.StringVar(value='Listo. Espera a alcanzar la base antes de abrir el juego. El relevo es aproximado.')
-    summary_text = tk.StringVar(value='')
-    ttk.Label(box, textvariable=summary_text, wraplength=650).pack(anchor='w')
-    logtext = tk.StringVar(value='')
-    ttk.Label(box, textvariable=reading, font=('Segoe UI', 15, 'bold')).pack(anchor='w', pady=7)
-    ttk.Label(box, textvariable=status, wraplength=600).pack(anchor='w')
-    ttk.Label(box, textvariable=logtext, wraplength=600).pack(anchor='w', pady=7)
     stop, messages = threading.Event(), queue.Queue()
     worker = None
     closing = False
-    buttons = ttk.Frame(box)
-    buttons.pack(fill='x', pady=10)
     def enable(running):
         start_button.configure(state='disabled' if running else 'normal')
         stop_button.configure(state='normal' if running else 'disabled')
@@ -903,7 +1045,7 @@ def main(simulate=False):
         for entry in fields:
             entry.configure(state='disabled' if running else 'normal')
         if not running:
-            update_sensor_mode()
+            update_modes()
     def start():
         nonlocal worker
         try:
@@ -928,7 +1070,7 @@ def main(simulate=False):
             trigger = Cutover(trigger_box.get(), *trigger_values[:4]) if watched else None
             ramp_seconds = trigger_values[4]
             if not math.isfinite(ramp_seconds) or not .5 <= ramp_seconds <= 30:
-                raise ValueError('Retirada gradual: entre 0,5 y 30 segundos.')
+                raise ValueError('Suavidad: entre 0,5 y 30 segundos.')
         except (ValueError, OSError, RuntimeError) as exc:
             messagebox.showerror('Valores', str(exc))
             return
@@ -948,11 +1090,15 @@ def main(simulate=False):
     def halt():
         stop.set()
         status.set('Parada solicitada; retirando gradualmente la carga antes de liberar CUDA…')
-    start_button = ttk.Button(buttons, text='INICIAR', command=start)
-    start_button.pack(side='left', padx=(0, 10))
+    start_button = ttk.Button(buttons, text='INICIAR', command=start, style='Big.TButton')
+    start_button.pack(side='left')
+    tip(start_button, HELP['start'])
     stop_button = ttk.Button(buttons, text='PARAR (Esc)', command=halt, state='disabled')
-    stop_button.pack(side='left')
-    ttk.Button(buttons, text='FORZAR CIERRE INMEDIATO', command=lambda: os._exit(0)).pack(side='right')
+    stop_button.pack(side='left', padx=10)
+    tip(stop_button, HELP['stop'])
+    force_button = ttk.Button(buttons, text='FORZAR CIERRE', command=lambda: os._exit(0))
+    force_button.pack(side='right')
+    tip(force_button, HELP['force'])
     root.bind('<Escape>', lambda _: halt())
     def close():
         nonlocal closing
@@ -991,11 +1137,11 @@ def main(simulate=False):
             return
         root.after(100, poll)
     # Open ready for the last game used.
+    update_modes()
     refresh_games(store.last)
     choose_game()
     poll()
     root.mainloop()
-
 
 if __name__ == '__main__':
     main(simulate='--simular' in sys.argv[1:])

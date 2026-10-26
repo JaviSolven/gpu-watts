@@ -284,3 +284,23 @@ tarjeta NVIDIA, también te ofrece abrir la simulación.
 - Los juegos guardados y los CSV de registro se guardan igual que en el modo real.
 Es un modelo aproximado: sirve para ver el comportamiento del programa, no para
 predecir los W exactos de tu tarjeta ni de un juego concreto.
+
+PANEL REORGANIZADO (CAMBIO TRAS LA 1.0)
+El panel se ordena en pasos y cada campo explica qué hace al dejar el ratón
+encima (ⓘ). Uso: 1. elige el juego, 2. pulsa INICIAR, 3. con «Base aproximada
+alcanzada», abre el juego.
+- Izquierda: 1 · Juego (lista, Steam… y ejecutable vigilado), 2 · Precarga,
+  3 · Relevo al juego y 4 · Tarjeta y temperaturas.
+- Derecha, siempre visible: INICIAR / PARAR / FORZAR CIERRE y el estado.
+- Solo se muestra lo que aplica: el umbral GPU y la CPU solo con los modos
+  clásicos; el CSV y sus columnas solo con la fuente CSV HWiNFO; la VRAM a
+  recorrer solo se activa con VRAM o Mixto.
+Nombres que cambian respecto a lo explicado más arriba:
+  «Proceso para el relevo»               → «Ejecutable vigilado»
+  «Base de consumo TOTAL antes del juego» → «Base de consumo (W)»
+  «Límite de carga antes de rampa»        → «Tiempo máximo (s)»
+  «Suavidad de ajuste/retirada»           → «Suavidad (s)»
+  «Mantener condición durante»            → «Confirmar durante (s)»
+  «Espera inicial tras detectar proceso»  → «Espera inicial (s)»
+  «Iniciar retirada si core/VRAM alcanza» → «Retirar si core/VRAM llega a (°C)»
+Los ajustes de los juegos guardados antes de este cambio se siguen cargando.
