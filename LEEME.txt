@@ -264,3 +264,21 @@ lanzador. En caso de duda, abre el juego una vez y mira en el desplegable de
 «Proceso» qué nombre aparece.
 La lista se guarda en %LOCALAPPDATA%\GPU_Watts\juegos.json. Si ese fichero se
 estropea, se aparta como juegos.json.danado y se empieza con la lista vacía.
+
+MODO SIMULACIÓN (CAMBIO TRAS LA 1.0)
+SIMULAR.bat abre el panel con una tarjeta y un juego de mentira: no carga
+ninguna GPU ni necesita NVIDIA. Sirve para ver el panel y ensayar ajustes y
+cambios del programa en cualquier PC. Si abres INICIAR.bat en un equipo sin
+tarjeta NVIDIA, también te ofrece abrir la simulación.
+- La tarjeta simulada (una RTX 5080 de ~35 W en reposo y ~340 W a tope) responde
+  a la carga como la real: más SM o más turno = más W, con el retardo de ~1 s de
+  la lectura. Las temperaturas suben despacio con el consumo.
+- «Abrir juego simulado» hace aparecer el proceso elegido en «Proceso»: 6 s de
+  pantalla de carga con poco consumo y después los «W del juego». Mientras los
+  dos trabajan se reparten la GPU, como en Windows. «Cerrar juego simulado» lo
+  hace desaparecer.
+- Ensayo típico: INICIAR, esperar a «Base aproximada alcanzada», abrir el juego
+  simulado y ver el relevo hasta que la ventana se cierra sola.
+- Los juegos guardados y los CSV de registro se guardan igual que en el modo real.
+Es un modelo aproximado: sirve para ver el comportamiento del programa, no para
+predecir los W exactos de tu tarjeta ni de un juego concreto.

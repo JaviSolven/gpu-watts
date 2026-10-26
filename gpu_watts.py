@@ -11,6 +11,7 @@ import time
 from sensors import NativeSensors, CsvSensors, check_temperatures
 from cutover import Cutover, MODES, read_cpu_times, AdaptiveHandoff, ADAPTIVE_MODE
 from games import GameStore, steam_games, game_executables
+from simulation import SimulatedGpu
 
 P = C.c_void_p
 U = C.c_uint
@@ -94,7 +95,7 @@ class Telemetry:
             except OSError:
                 pass
         else:
-            raise RuntimeError('No se encuentra NVML. Reinstala el controlador NVIDIA oficial.')
+            raise RuntimeError('No se encuentra el controlador NVIDIA (nvml.dll): este equipo no tiene tarjeta NVIDIA o le falta su controlador oficial.')
         bind(self.lib, 'nvmlInit_v2', [])()
         self.shutdown = bind(self.lib, 'nvmlShutdown', [])
         self.handle = bind(self.lib, 'nvmlDeviceGetHandleByIndex_v2', [U, C.POINTER(P)])
@@ -418,7 +419,9 @@ def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoff
         run_unit(compute, duty, level, stop, started+seconds)
 
 
-def run_load(telemetry, device, target, duration, cutoff, stop, messages, process='', close_on_process=True, sensors=None, mem_cutoff=85, mode='Core', vram_mb=512, trigger=None, ramp_seconds=0):
+def run_load(telemetry, device, target, duration, cutoff, stop, messages, process='', close_on_process=True, sensors=None, mem_cutoff=85, mode='Core', vram_mb=512, trigger=None, ramp_seconds=0, make_compute=None, processes=None):
+    # make_compute/processes replace CUDA and the Windows process list in simulation.
+    processes = processes or process_names
     compute = None
     reason = 'Tiempo completado'
     detected = False
@@ -432,7 +435,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
             raise ValueError('La retirada gradual debe durar entre 0 y 30 segundos.')
         trigger = trigger or Cutover(mode='Al aparecer')
         adaptive = AdaptiveHandoff(target,ramp_seconds,trigger.hold,trigger.grace) if trigger.mode == ADAPTIVE_MODE else None
-        if process and trigger.mode == 'Al aparecer' and process in {n.casefold() for n in process_names()}:
+        if process and trigger.mode == 'Al aparecer' and process in {n.casefold() for n in processes()}:
             detected = True
             reason = f'Proceso ya abierto: {process}; no se ha iniciado carga'
             return
@@ -456,7 +459,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
         if stop.is_set():
             return
         messages.put(('status', 'Preparando CUDA; la duración comienza con la carga…'))
-        compute = Compute(uuid, mode, vram_mb)
+        compute = (make_compute or Compute)(uuid, mode, vram_mb)
         folder = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'GPU_Watts' / 'logs'
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f'{time.time_ns()}.csv'
@@ -475,7 +478,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                 temperatures = check_temperatures(sensors.read(), cutoffs, require_memory=getattr(sensors, 'monitor_vram', True))
                 messages.put(('temperatures', temperatures))
                 measured, temp, limit = telemetry.read(h)
-                process_present = bool(process) and process in {n.casefold() for n in process_names()}
+                process_present = bool(process) and process in {n.casefold() for n in processes()}
                 if not process_present:
                     level = None
                 elif level is None:
@@ -564,19 +567,25 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
             messages.put(('autoclose', True))
 
 
-def main():
+def main(simulate=False):
     import tkinter as tk
     from tkinter import ttk, messagebox
     root = tk.Tk()
-    root.title('GPU Watts 1.0 · carga temporal NVIDIA')
     root.geometry('800x830')
     root.minsize(720, 550)
-    try:
-        telemetry = Telemetry()
-    except Exception as exc:
-        messagebox.showerror('GPU Watts', str(exc))
-        root.destroy()
-        return
+    if not simulate:
+        try:
+            telemetry = Telemetry()
+        except Exception as exc:
+            root.withdraw()
+            if not messagebox.askyesno('GPU Watts', f'{exc}\n\n¿Abrir en modo simulación para ver y probar el panel? No carga ninguna tarjeta.'):
+                root.destroy()
+                return
+            root.deiconify()
+            simulate = True
+    if simulate:
+        telemetry = SimulatedGpu()
+    root.title('GPU Watts 1.0 · SIMULACIÓN (no carga ninguna tarjeta)' if simulate else 'GPU Watts 1.0 · carga temporal NVIDIA')
     canvas = tk.Canvas(root, highlightthickness=0)
     scrollbar = ttk.Scrollbar(root, orient='vertical', command=canvas.yview)
     scrollbar.pack(side='right', fill='y')
@@ -589,6 +598,37 @@ def main():
     root.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-int(e.delta/120), 'units'))
     ttk.Label(box, text='GPU Watts', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
     ttk.Label(box, text='Cálculo CUDA con regulación por consumo medio').pack(anchor='w', pady=(0, 14))
+    if simulate:
+        sim_box = ttk.LabelFrame(box, text='MODO SIMULACIÓN', padding=10)
+        sim_box.pack(fill='x', pady=(0, 14))
+        ttk.Label(sim_box, foreground='#b00020', wraplength=650, text='Tarjeta, W, temperaturas y juego son de mentira: sirve para ver y probar el panel. '
+                  'Pulsa INICIAR, espera a la base y abre el juego simulado con el proceso elegido abajo.').pack(anchor='w')
+        sim_row = ttk.Frame(sim_box)
+        sim_row.pack(fill='x', pady=(8, 0))
+        ttk.Label(sim_row, text='W del juego').pack(side='left')
+        sim_watts = ttk.Entry(sim_row, width=6)
+        sim_watts.insert(0, '300')
+        sim_watts.pack(side='left', padx=(6, 12))
+        sim_text = tk.StringVar(value='Juego simulado cerrado.')
+        def open_sim_game():
+            try:
+                exe = normalized_process(process_box.get())
+                watts = float(sim_watts.get().replace(',', '.'))
+                if not exe:
+                    raise ValueError('Elige o escribe primero el proceso del juego.')
+                if not math.isfinite(watts) or not 40 <= watts <= 340:
+                    raise ValueError('W del juego simulado: entre 40 y 340.')
+            except ValueError as exc:
+                messagebox.showerror('Simulación', str(exc))
+                return
+            telemetry.open_game(exe, watts)
+            sim_text.set(f'Juego simulado abierto: {exe} · pantalla de carga 6 s, luego ~{watts:.0f} W.')
+        def close_sim_game():
+            telemetry.close_game()
+            sim_text.set('Juego simulado cerrado.')
+        ttk.Button(sim_row, text='Abrir juego simulado', command=open_sim_game).pack(side='left')
+        ttk.Button(sim_row, text='Cerrar juego simulado', command=close_sim_game).pack(side='left', padx=6)
+        ttk.Label(sim_box, textvariable=sim_text).pack(anchor='w', pady=(6, 0))
     gpu = ttk.Combobox(box, state='readonly', values=[f'{i}: {v[1]}' for i, v in enumerate(telemetry.devices)])
     gpu.current(0)
     gpu.pack(fill='x')
@@ -860,6 +900,8 @@ def main():
                 if not csv_path.get() or any(s.current() < 0 for s in column_boxes):
                     raise ValueError('Elige un CSV activo y sus dos columnas de temperatura.')
                 source = CsvSensors(csv_path.get(), [s.current() for s in column_boxes])
+            elif simulate:
+                source = telemetry.sensors(monitor_vram=source_box.current() != 2)
             else:
                 source = NativeSensors(telemetry, telemetry.devices[gpu.current()][0], monitor_vram=source_box.current() != 2)
             watched = normalized_process(process_box.get())
@@ -881,7 +923,8 @@ def main():
                 refresh_games(watched)
             except OSError as exc:
                 summary_text.set(f'No se pudieron guardar los ajustes del juego: {exc}')
-        worker = threading.Thread(target=run_load, args=(telemetry, gpu.current(), *values[:3], stop, messages, watched, close_on_process.get(), source, *values[3:], mode_box.get(), memory_mb, trigger, ramp_seconds), daemon=True)
+        simulation = {'make_compute': telemetry.compute, 'processes': telemetry.processes} if simulate else {}
+        worker = threading.Thread(target=run_load, args=(telemetry, gpu.current(), *values[:3], stop, messages, watched, close_on_process.get(), source, *values[3:], mode_box.get(), memory_mb, trigger, ramp_seconds), kwargs=simulation, daemon=True)
         worker.start()
     def halt():
         stop.set()
@@ -936,4 +979,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    main(simulate='--simular' in sys.argv[1:])
