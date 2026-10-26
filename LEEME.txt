@@ -283,8 +283,10 @@ tarjeta NVIDIA, también te ofrece abrir la simulación.
   pantalla de carga con poco consumo y después los «W del juego». Mientras los
   dos trabajan se reparten la GPU, como en Windows. «Cerrar juego simulado» lo
   hace desaparecer.
-- Ensayo típico: INICIAR, esperar a «Base aproximada alcanzada», abrir el juego
-  simulado y ver el relevo hasta que la ventana se cierra sola.
+- Ensayo típico: INICIAR, esperar al aviso verde «ABRE EL JUEGO AHORA», abrir el
+  juego simulado y ver el relevo hasta que la ventana se cierra sola. El
+  recuadro del juego simulado está abajo del todo, debajo de INICIAR y del
+  estado, para no abrirlo antes de tiempo.
 - Los juegos guardados y los CSV de registro se guardan igual que en el modo real.
 - «Steam…» muestra una biblioteca de EJEMPLO (Steel Nomad, Crimson Desert y un
   juego con lanzador) para ensayar el recorrido Steam → INICIAR → relevo. Los
@@ -330,6 +332,8 @@ Ahora:
 
 AVISO «ABRE EL JUEGO AHORA» (CAMBIO TRAS LA 1.0)
 Encima del estado aparece un aviso grande que dice qué hacer en cada momento:
+- Gris, antes de empezar: «Pulsa INICIAR. No abras el juego hasta que aquí
+  aparezca ▶ ABRE EL JUEGO AHORA».
 - Naranja «Subiendo a la base… Todavía NO abras el juego».
 - Verde «▶ ABRE EL JUEGO AHORA» cuando la base está puesta. Suena un pitido de
   Windows y el título de la ventana cambia a «▶ ABRE EL JUEGO AHORA», que se ve
@@ -337,3 +341,26 @@ Encima del estado aparece un aviso grande que dice qué hacer en cada momento:
 - Azul «Juego detectado: GPU Watts se va retirando poco a poco» durante el relevo.
 Al terminar, el aviso desaparece. Sin juego vigilado, el verde dice solo «BASE
 ALCANZADA» (no habrá relevo).
+
+REPARTO ESTIMADO GPU WATTS / JUEGO (CAMBIO TRAS LA 1.0)
+Con el juego abierto, debajo de los W aparece «Reparto aprox.: GPU Watts ≈ X W ·
+juego ≈ Y W». Es una ESTIMACIÓN: el controlador NVIDIA solo da el consumo de la
+tarjeta entera. Antes de abrir el juego, todo lo que pasa del reposo es de GPU
+Watts, y así se sabe cuántos W pone por cada % de aportación; con el juego
+abierto, su parte se calcula con la aportación que le queda y el resto se
+atribuye al juego (incluido el escritorio). Cuando GPU Watts llega a 0 %, dice
+«todo es del juego».
+
+JUEGO QUE GASTA MENOS QUE LA BASE (CAMBIO TRAS LA 1.0)
+Antes, el relevo adaptativo solo terminaba si la tarjeta se sostenía sola al
+95 % de la base. Con un juego que gasta menos (por ejemplo base 260 W y juego
+240 W, o un juego con FPS limitados), GPU Watts seguía «ayudando» con unos W
+hasta agotar el tiempo máximo y le restaba rendimiento al juego.
+Ahora, usando el reparto estimado: cuando la parte del juego llega al 70 % de
+la base y se mantiene 1 s, el juego ya está jugando (no en una pantalla de
+carga). Desde ese momento GPU Watts se retira del todo a la Suavidad elegida,
+no vuelve a ayudar aunque el total baje, y el relevo termina al llegar a cero
+(con la espera inicial y «Confirmar durante» de siempre). Durante las pantallas
+de carga, con el juego gastando poco, sigue sosteniendo la base como antes.
+Si el juego gasta menos del 70 % de la base, conviene bajar la base para ese
+juego: cada juego guarda sus propios ajustes.

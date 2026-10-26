@@ -103,18 +103,28 @@ MODES = (ADAPTIVE_MODE,) + MODES
 
 
 class AdaptiveHandoff:
-    """Control our duty from board power. Never claims to measure game-only watts."""
+    """Control our duty from board power. Never claims to measure game-only watts.
+
+    The board must hold 95 % of the base without us. A game that draws less
+    than that would keep us supporting it until the time limit, so once the
+    game's own part (estimated by the caller) reaches TAKEOVER of the base
+    for a second it is really playing, not loading: from then on we only
+    withdraw, and the handoff ends when our load reaches zero."""
+    TAKEOVER, TAKEOVER_SECONDS = .7, 1.0
+
     def __init__(self, target, ramp_seconds=5, hold=2, grace=2):
         self.target = target
         self.ramp_seconds = max(.5, ramp_seconds)
         self.hold, self.grace = hold, grace
         self.first_seen = self.previous_time = self.since = None
         self.ceiling = None
+        self.game_since, self.committed = None, False
 
-    def update(self, now, present, measured, duty, power_limit):
+    def update(self, now, present, measured, duty, power_limit, game_watts=None):
         if not present:
             self.first_seen = self.previous_time = self.since = None
             self.ceiling = None
+            self.game_since, self.committed = None, False
             return duty, False, 'Preparando/manteniendo la base antes del proceso'
         if self.first_seen is None:
             self.first_seen = now
@@ -122,10 +132,19 @@ class AdaptiveHandoff:
             self.ceiling = max(0, duty)
         dt = max(0, min(1, now-self.previous_time))
         self.previous_time = now
+        if game_watts is not None and game_watts >= self.TAKEOVER*self.target:
+            if self.game_since is None:
+                self.game_since = now
+            self.committed = self.committed or now-self.game_since >= self.TAKEOVER_SECONDS
+        else:
+            self.game_since = None
         max_step = self.ceiling*dt/self.ramp_seconds
         low = self.target*.95
         error = self.target-measured
-        if measured >= low:
+        if self.committed:
+            # Withdraw at the chosen smoothness and never support again.
+            duty = max(0, duty-max_step)
+        elif measured >= low:
             # Probe gradual withdrawal even inside the power deadband. If the
             # game cannot sustain the base, the next low readings restore support.
             wanted = max(.003, (measured-low)/max(power_limit,1)*.6)
@@ -135,7 +154,7 @@ class AdaptiveHandoff:
             duty = min(self.ceiling,duty+min(max_step,wanted))
         if duty < .000001:
             duty = 0.0
-        ready = duty == 0 and measured >= low and now-self.first_seen >= self.grace
+        ready = duty == 0 and (measured >= low or self.committed) and now-self.first_seen >= self.grace
         if ready:
             if self.since is None:
                 self.since = now
@@ -143,6 +162,8 @@ class AdaptiveHandoff:
             self.since = None
         confirmed = self.since is not None and now-self.since >= self.hold
         text = f'Relevo adaptativo · GPU total {measured:.0f}/{self.target:.0f} W · aportación programada {duty*100:.1f}%'
+        if self.committed:
+            text += ' · el juego ya juega: retirada definitiva'
         if self.since is not None:
             text += f' · sin carga propia {now-self.since:.1f}/{self.hold:g} s'
         return duty, confirmed, text

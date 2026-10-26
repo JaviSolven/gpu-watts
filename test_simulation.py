@@ -80,6 +80,46 @@ class SimulationTests(unittest.TestCase):
         self.assertTrue(any(k == 'done' and v.startswith('Relevo:') for k, v in q.queue), [v for k, v in q.queue if k == 'done'])
         self.assertIn(('autoclose', True), list(q.queue))
         self.assertEqual([v for k, v in q.queue if k == 'phase'], ['relevo'])
+    def test_split_between_us_and_the_game(self):
+        gpu, q = sim.SimulatedGpu(), queue.Queue()
+        def processes():
+            # The player opens the game when the green notice appears.
+            if gpu.game is None and ('phase', 'base') in list(q.queue):
+                gpu.open_game('steelnomad.exe', 320)
+            return gpu.processes()
+        with patch.object(sim, 'LOADING', .5):
+            app.run_load(gpu, 0, 200, 20, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(),
+                         trigger=Cutover(ADAPTIVE_MODE, hold=.5, grace=0), ramp_seconds=1,
+                         make_compute=gpu.compute, processes=processes)
+        events = list(q.queue)
+        self.assertIn(('autoclose', True), events)
+        splits = [v for k, v in events if k == 'split' and v is not None]
+        totals = [v[0] for k, v in events if k == 'sample']
+        self.assertTrue(splits)
+        own_first, own_last = splits[0][0], splits[-1][0]
+        # At first almost everything above idle (~35 W) is ours; at the end nothing is.
+        self.assertGreater(own_first, 120)
+        self.assertLess(own_first, 210)
+        self.assertLess(own_last, 5)
+        for own, rest in splits:
+            self.assertGreaterEqual(own, 0)
+            self.assertGreater(rest, 0)
+        # Each split adds up to that sample's board reading (the last one comes with the handoff).
+        for own, rest in splits[:-1]:
+            self.assertTrue(any(abs(own+rest-total) < .01 for total in totals))
+    def test_game_below_the_base_hands_off_once_playing(self):
+        # The case from the second screenshot: base 260 W, game 240 W.
+        gpu, q = sim.SimulatedGpu(), queue.Queue()
+        def processes():
+            if gpu.game is None and ('phase', 'base') in list(q.queue):
+                gpu.open_game('steelnomad.exe', 240)
+            return gpu.processes()
+        with patch.object(sim, 'LOADING', .5):
+            app.run_load(gpu, 0, 260, 30, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(),
+                         trigger=Cutover(ADAPTIVE_MODE, hold=1, grace=0), ramp_seconds=2,
+                         make_compute=gpu.compute, processes=processes)
+        self.assertTrue(any(k == 'done' and v.startswith('Relevo:') for k, v in q.queue), [v for k, v in q.queue if k == 'done'])
+        self.assertIn(('autoclose', True), list(q.queue))
     def test_run_load_reaches_towards_the_base(self):
         gpu, q = sim.SimulatedGpu(), queue.Queue()
         app.run_load(gpu, 0, 100, 3, 75, threading.Event(), q, sensors=gpu.sensors(), make_compute=gpu.compute, processes=gpu.processes)

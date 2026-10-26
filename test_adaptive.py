@@ -58,6 +58,41 @@ class AdaptiveTests(unittest.TestCase):
         c.update(0,True,350,.8,360)
         duty,_,_=c.update(.5,True,350,.8,360)
         self.assertAlmostEqual(duty,.76)
+    def test_game_below_base_but_playing_still_hands_off(self):
+        # Base 260 W, the game alone draws ~240 W: under 95 % of the base, yet playing.
+        c=AdaptiveHandoff(260,ramp_seconds=5,hold=2,grace=2)
+        duty,ready,now=.15,False,0.0
+        while not ready and now<30:
+            own=duty*300
+            duty,ready,text=c.update(now,True,240+own*.2,duty,360,game_watts=207)
+            now+=.5
+        self.assertTrue(ready)
+        self.assertEqual(duty,0)
+        self.assertLess(now,12)
+        self.assertIn('retirada definitiva',text)
+    def test_takeover_is_one_way(self):
+        c=AdaptiveHandoff(260,ramp_seconds=5,hold=2,grace=0)
+        duty=.15
+        for i in range(4):
+            duty,_,_=c.update(i*.5,True,230,duty,360,game_watts=200)
+        before=duty
+        # A loading screen later on no longer brings support back.
+        duty,_,_=c.update(2,True,120,duty,360,game_watts=80)
+        self.assertLess(duty,before)
+    def test_loading_screen_keeps_the_base(self):
+        c=AdaptiveHandoff(260,ramp_seconds=5,hold=2,grace=0)
+        duty=.6
+        for i in range(10):
+            duty,ready,_=c.update(i*.5,True,240,duty,360,game_watts=60)
+        self.assertEqual(duty,.6)  # still supporting at the level it had
+        self.assertFalse(ready)
+    def test_short_game_peak_is_not_a_takeover(self):
+        c=AdaptiveHandoff(260,ramp_seconds=5,hold=2,grace=0)
+        duty=.6
+        duty,_,_=c.update(0,True,240,duty,360,game_watts=60)
+        duty,_,_=c.update(.5,True,240,duty,360,game_watts=200)  # half a second only
+        duty,_,_=c.update(1,True,240,duty,360,game_watts=60)
+        self.assertFalse(c.committed)
 
 
 if __name__=='__main__':unittest.main()

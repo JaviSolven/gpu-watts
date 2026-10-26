@@ -502,6 +502,10 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
         sample_at = start
         pacer = Pacer()
         base_reached, shown_phase = False, None
+        # Watts we add per unit of duty, learnt before the game while every watt
+        # above idle is ours. The driver only reports the whole board, so with the
+        # game open our part is this times the duty of the last half second.
+        watts_per_duty, last_duty, splitting = limit-idle, duty, False
         duty = 0.01
         measured = idle
         while not stop.is_set() and time.monotonic() < deadline:
@@ -519,10 +523,14 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                     # hand off. Work at base intensity in short turns instead.
                     level = duty if duty >= base_intensity/2 else base_intensity
                 counters = process_cpu_times(process) if process_present and trigger.uses_cpu else None
+                # Our part of the board reading (estimated; see watts_per_duty) and the rest, the game's.
+                if not process_present and last_duty >= .05:
+                    watts_per_duty = max(0.0, measured-idle)/last_duty
+                own = max(0.0, min(measured, watts_per_duty*last_duty))
                 ready = False
                 if process:
                     if adaptive is not None:
-                        duty, ready, description = adaptive.update(time.monotonic(),process_present,measured,duty,limit)
+                        duty, ready, description = adaptive.update(time.monotonic(),process_present,measured,duty,limit,measured-own)
                         trigger.present = process_present
                         trigger.description = description
                     else:
@@ -534,6 +542,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                     writer.writerow([round(time.monotonic()-start,3), target, measured, *temperatures, round(duty,4), limit, mode, vram_mb if mode != 'Core' else 0, getattr(sensors,'monitor_vram',True), process_present, trigger.cpu_percent, trigger.mode, 'relevo'])
                     output.flush()
                     messages.put(('watch', trigger.description))
+                    messages.put(('split', (own, measured-own)))
                     break
                 if process:
                     messages.put(('watch', trigger.description))
@@ -568,6 +577,13 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                 if phase != shown_phase:
                     messages.put(('phase', phase))
                     shown_phase = phase
+                if process_present:
+                    messages.put(('split', (own, measured-own)))
+                    splitting = True
+                elif splitting:
+                    messages.put(('split', None))
+                    splitting = False
+                last_duty = duty
                 messages.put(('sample', (measured, temp, duty, max(0, deadline-now), state)))
                 sample_at = time.monotonic() + 0.5
             if duty <= 0:
@@ -629,8 +645,10 @@ HELP = {
     'vram_mb': 'Solo para VRAM y Mixto: tamaño del bloque de memoria que se recorre, 64–4096 MiB. Siempre deja al '
                'menos 1 GiB libre. Es carga, no una prueba de la memoria.',
     'trigger': 'Relevo adaptativo (recomendado): mantiene la base hasta que aparece el juego; después va quitando '
-               'su carga a medida que el juego consume, y vuelve a ayudar si el consumo cae. Termina cuando su '
-               'carga es cero y la tarjeta se sostiene sola al 95 % de la base.\n\nModos clásicos: congelan la '
+               'su carga a medida que el juego consume, y vuelve a ayudar si el consumo cae (pantallas de carga). '
+               'Termina cuando su carga es cero y la tarjeta se sostiene sola al 95 % de la base. Si el juego gasta '
+               'menos que la base, en cuanto su parte llega al 70 % de la base ya está jugando: GPU Watts se retira '
+               'del todo, no vuelve a ayudar y termina igualmente.\n\nModos clásicos: congelan la '
                'carga al aparecer el juego y esperan a que se cumpla un umbral de W o de CPU.',
     'grace': 'Segundos desde que aparece el juego antes de poder dar el relevo por terminado. Evita cerrar en el '
              'primer instante.',
@@ -655,11 +673,16 @@ HELP = {
              'y entonces abre el juego.',
     'stop': 'Retira la carga poco a poco (según la Suavidad) y para. También con Esc o cerrando la ventana.',
     'force': 'Cierra al instante, sin retirada gradual. Solo si algo va mal.',
+    'split': 'ESTIMACIÓN. El controlador NVIDIA solo da el consumo de la tarjeta entera, no el de cada programa. '
+             'Antes de abrir el juego, todo lo que pasa del reposo es de GPU Watts: así se sabe cuántos W pone por '
+             'cada % de aportación. Con el juego abierto, su parte se calcula con la aportación que le queda, y el '
+             'resto es del juego (incluido el escritorio). Cuando GPU Watts llega a 0 %, todo es del juego.',
     'sim_watts': 'SOLO SIMULACIÓN. Cuánto gastaría el juego de mentira cuando ya está jugando (tras 6 s de pantalla '
                  'de carga). Con la tarjeta real no existe: el juego gasta lo que gasta.\n\nNo es la «Base de '
                  'consumo», que es lo que GPU Watts mantiene antes del juego. Prueba un juego por encima de la base '
                  '(300) y otro por debajo (150) para ver la diferencia: por debajo, GPU Watts no llega a retirarse.',
-    'sim_open': 'SOLO SIMULACIÓN. Hace aparecer el «Ejecutable vigilado» del paso 1 como si hubieras abierto el juego.',
+    'sim_open': 'SOLO SIMULACIÓN. Hace aparecer el «Ejecutable vigilado» del paso 1 como si hubieras abierto el juego. '
+                'Úsalo después de INICIAR, cuando arriba salga el aviso verde «ABRE EL JUEGO AHORA».',
     'sim_close': 'SOLO SIMULACIÓN. Hace desaparecer el juego de mentira, como si lo cerraras.',
 }
 
@@ -879,11 +902,54 @@ def main(simulate=False):
     fields = [base_entry, duration_entry, core_entry, vram_c_entry]
     trigger_fields = [gpu_w_entry, cpu_entry, hold_entry, grace_entry, smooth_entry]
 
-    # Right column: simulation, buttons and state.
+    # Right column: buttons, what to do now, state and, last, the simulated game.
+    buttons = ttk.Frame(right)
+    buttons.pack(fill='x', pady=(0, 12))
+    state_box = ttk.LabelFrame(right, text='Estado (lecturas simuladas)' if simulate else 'Estado', padding=(12, 8), style='Step.TLabelframe')
+    state_box.pack(fill='x')
+    # Big notice of what to do now: wait, open the game, or the handoff is under way.
+    banner = tk.Label(right, justify='center', padx=10, pady=10, wraplength=340)
+    plain_title = root.title()
+    def show_phase(phase):
+        root.title(plain_title)
+        if phase is None:
+            banner.configure(text='Pulsa INICIAR.\nNo abras el juego hasta que aquí aparezca «▶ ABRE EL JUEGO AHORA».',
+                             bg='#eceff1', fg='#263238', font=('Segoe UI', 11, 'bold'))
+        elif phase == 'base':
+            text = ('▶  ABRE EL JUEGO AHORA\nLa base está puesta: lánzalo desde Steam o su acceso directo.' if watching
+                    else 'BASE ALCANZADA\nNo hay juego vigilado: no habrá relevo.')
+            if simulate and watching:
+                text += '\nEn simulación: «Abrir juego simulado», abajo.'
+            banner.configure(text=text, bg='#1e7d32', fg='#ffffff', font=('Segoe UI', 15, 'bold'))
+            root.title('▶ ABRE EL JUEGO AHORA · ' + plain_title)
+            root.bell()
+        elif phase == 'subiendo':
+            banner.configure(text='Subiendo a la base…\nTodavía NO abras el juego.', bg='#fff3e0', fg='#8a4b00', font=('Segoe UI', 12, 'bold'))
+        else:
+            banner.configure(text='Juego detectado\nGPU Watts se va retirando poco a poco.', bg='#e3f2fd', fg='#0d47a1', font=('Segoe UI', 12, 'bold'))
+        banner.pack(fill='x', pady=(0, 12), before=state_box)
+    reading = tk.StringVar(value='Sin carga')
+    temperature_text = tk.StringVar(value='Core: —   VRAM: —')
+    status = tk.StringVar(value='Listo. Elige el juego y pulsa INICIAR.')
+    watch_text = tk.StringVar(value='')
+    summary_text = tk.StringVar(value='')
+    logtext = tk.StringVar(value='')
+    ttk.Label(state_box, textvariable=reading, font=('Segoe UI', 15, 'bold'), wraplength=340).pack(anchor='w')
+    split_text = tk.StringVar(value='')
+    split_label = ttk.Label(state_box, textvariable=split_text, font=('Segoe UI', 11, 'bold'), foreground='#0d47a1', wraplength=340)
+    split_label.pack(anchor='w', pady=(2, 0))
+    tip(split_label, texts['split'])
+    ttk.Label(state_box, textvariable=temperature_text, wraplength=340).pack(anchor='w', pady=(4, 8))
+    ttk.Label(state_box, textvariable=status, wraplength=340).pack(anchor='w')
+    ttk.Label(state_box, textvariable=watch_text, wraplength=340).pack(anchor='w', pady=(8, 0))
+    ttk.Label(state_box, textvariable=summary_text, wraplength=340).pack(anchor='w', pady=(8, 0))
+    ttk.Label(state_box, textvariable=logtext, wraplength=340, style='Hint.TLabel').pack(anchor='w', pady=(8, 0))
+    ttk.Label(right, text='Los W son una media aproximada (~1 s), no un techo instantáneo. GPU Watts no toca voltajes, BIOS ni el límite de potencia.',
+              wraplength=360, style='Hint.TLabel').pack(anchor='w', pady=(10, 0))
     if simulate:
         sim_box = ttk.LabelFrame(right, text='SOLO SIMULACIÓN · no existe con la tarjeta real', padding=10, style='Sim.TLabelframe')
-        sim_box.pack(fill='x', pady=(0, 12))
-        ttk.Label(sim_box, foreground='#b00020', wraplength=340, text='Este recuadro imita un juego para ensayar. '
+        sim_box.pack(fill='x', pady=(12, 0))
+        ttk.Label(sim_box, foreground='#b00020', wraplength=340, text='Este recuadro imita un juego para ensayar: ábrelo SOLO cuando arriba salga el aviso verde. '
                   'Con la tarjeta real no aparece: el juego de verdad gasta lo que gasta. Los pasos 1 a 4 de la '
                   'izquierda sí son ajustes reales.').pack(anchor='w')
         sim_row = ttk.Frame(sim_box)
@@ -921,43 +987,6 @@ def main(simulate=False):
         sim_close.pack(side='left', padx=6)
         tip(sim_close, texts['sim_close'])
         ttk.Label(sim_box, textvariable=sim_text, wraplength=340).pack(anchor='w', pady=(6, 0))
-    buttons = ttk.Frame(right)
-    buttons.pack(fill='x', pady=(0, 12))
-    state_box = ttk.LabelFrame(right, text='Estado (lecturas simuladas)' if simulate else 'Estado', padding=(12, 8), style='Step.TLabelframe')
-    state_box.pack(fill='both', expand=True)
-    # Big notice of what to do now: wait, open the game, or the handoff is under way.
-    banner = tk.Label(right, justify='center', padx=10, pady=10, wraplength=340)
-    plain_title = root.title()
-    def show_phase(phase):
-        root.title(plain_title)
-        if phase is None:
-            banner.pack_forget()
-            return
-        if phase == 'base':
-            text = ('▶  ABRE EL JUEGO AHORA\nLa base está puesta: lánzalo desde Steam o su acceso directo.' if watching
-                    else 'BASE ALCANZADA\nNo hay juego vigilado: no habrá relevo.')
-            banner.configure(text=text, bg='#1e7d32', fg='#ffffff', font=('Segoe UI', 15, 'bold'))
-            root.title('▶ ABRE EL JUEGO AHORA · ' + plain_title)
-            root.bell()
-        elif phase == 'subiendo':
-            banner.configure(text='Subiendo a la base…\nTodavía NO abras el juego.', bg='#fff3e0', fg='#8a4b00', font=('Segoe UI', 12, 'bold'))
-        else:
-            banner.configure(text='Juego detectado\nGPU Watts se va retirando poco a poco.', bg='#e3f2fd', fg='#0d47a1', font=('Segoe UI', 12, 'bold'))
-        banner.pack(fill='x', pady=(0, 12), before=state_box)
-    reading = tk.StringVar(value='Sin carga')
-    temperature_text = tk.StringVar(value='Core: —   VRAM: —')
-    status = tk.StringVar(value='Listo. Elige el juego y pulsa INICIAR.')
-    watch_text = tk.StringVar(value='')
-    summary_text = tk.StringVar(value='')
-    logtext = tk.StringVar(value='')
-    ttk.Label(state_box, textvariable=reading, font=('Segoe UI', 15, 'bold'), wraplength=340).pack(anchor='w')
-    ttk.Label(state_box, textvariable=temperature_text, wraplength=340).pack(anchor='w', pady=(4, 8))
-    ttk.Label(state_box, textvariable=status, wraplength=340).pack(anchor='w')
-    ttk.Label(state_box, textvariable=watch_text, wraplength=340).pack(anchor='w', pady=(8, 0))
-    ttk.Label(state_box, textvariable=summary_text, wraplength=340).pack(anchor='w', pady=(8, 0))
-    ttk.Label(state_box, textvariable=logtext, wraplength=340, style='Hint.TLabel').pack(anchor='w', pady=(8, 0))
-    ttk.Label(right, text='Los W son una media aproximada (~1 s), no un techo instantáneo. GPU Watts no toca voltajes, BIOS ni el límite de potencia.',
-              wraplength=360, style='Hint.TLabel').pack(anchor='w', pady=(10, 0))
 
     def update_sensor_mode(_=None):
         only_core = source_box.current() == 2
@@ -1196,6 +1225,13 @@ def main(simulate=False):
                 watts, temp, duty, left, state = value
                 reading.set(f'{watts:.0f} W  ·  {temp} °C  ·  {left:.1f} s restantes')
                 status.set(f'{state} · actividad programada {duty*100:.0f}%')
+            elif kind == 'split':
+                if value is None:
+                    split_text.set('')
+                elif value[0] < .5:
+                    split_text.set(f'Reparto aprox.: GPU Watts 0 W · todo es del juego (≈ {value[1]:.0f} W)  ⓘ')
+                else:
+                    split_text.set(f'Reparto aprox.: GPU Watts ≈ {value[0]:.0f} W · juego ≈ {value[1]:.0f} W  ⓘ')
             elif kind == 'phase':
                 show_phase(value)
             elif kind == 'watch':
@@ -1208,6 +1244,7 @@ def main(simulate=False):
                 status.set(value)
                 if kind == 'done':
                     show_phase(None)
+                    split_text.set('')
                     reading.set('Sin carga generada por GPU Watts')
                     enable(False)
         if closing and (worker is None or not worker.is_alive()):
@@ -1217,6 +1254,7 @@ def main(simulate=False):
         root.after(100, poll)
     # Open ready for the last game used.
     update_modes()
+    show_phase(None)
     refresh_games(store.last)
     choose_game()
     poll()
