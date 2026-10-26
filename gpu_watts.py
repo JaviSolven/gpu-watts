@@ -396,16 +396,20 @@ class Pacer:
         self.owed = 0.0
 
     def unit(self, compute, duty, level, stop, until):
+        """One step: a unit of work, or part of the gap owed (waits are capped at
+        0.1 s so the caller keeps sampling, and no unit runs while a gap is owed)."""
         intensity, share = load_shape(duty, level)
-        compute.batch(intensity)
         if share >= 1:
             self.owed = 0.0
+            compute.batch(intensity)
             return
-        self.owed = min(.5, self.owed + compute.drain()*(1/max(share, .01)-1))
         if self.owed >= self.MIN_WAIT:
             started = time.monotonic()
             stop.wait(min(self.owed, .1, max(0, until-started)))
             self.owed -= time.monotonic()-started
+            return
+        compute.batch(intensity)
+        self.owed = min(1.0, self.owed + compute.drain()*(1/max(share, .01)-1))
 
 
 def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoffs, stop, messages, report=None, level=None):
@@ -453,9 +457,15 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
             raise ValueError('La retirada gradual debe durar entre 0 y 30 segundos.')
         trigger = trigger or Cutover(mode='Al aparecer')
         adaptive = AdaptiveHandoff(target,ramp_seconds,trigger.hold,trigger.grace) if trigger.mode == ADAPTIVE_MODE else None
-        if process and trigger.mode == 'Al aparecer' and process in {n.casefold() for n in processes()}:
+        already_open = bool(process) and process in {n.casefold() for n in processes()}
+        if already_open and trigger.mode == 'Al aparecer':
             detected = True
             reason = f'Proceso ya abierto: {process}; no se ha iniciado carga'
+            return
+        if already_open and adaptive is not None:
+            # The jump from idle has already happened: preloading now only takes GPU time from the game.
+            reason = (f'El juego ya está abierto ({process}): la precarga solo sirve antes de abrirlo. '
+                      'Ciérralo, pulsa INICIAR y ábrelo cuando ponga «Base aproximada alcanzada».')
             return
         h, name, uuid = telemetry.devices[device]
         sensors = sensors or NativeSensors(telemetry, h)
@@ -463,6 +473,8 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
         temperatures = check_temperatures(sensors.read(), cutoffs, require_memory=getattr(sensors, 'monitor_vram', True))
         messages.put(('temperatures', temperatures))
         idle, temp, limit = telemetry.read(h)
+        # Rough intensity that holds the base, for a game that appears before the base is reached.
+        base_intensity = max(.05, min(1.0, (target-idle)/max(limit-idle, 1)))
         if process and trigger.uses_gpu:
             if trigger.watts <= target + max(10, target*.10):
                 raise ValueError('El umbral GPU debe superar el objetivo de precarga al menos un 10% o 10 W.')
@@ -489,6 +501,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
         deadline = start + duration
         sample_at = start
         pacer = Pacer()
+        base_reached, shown_phase = False, None
         duty = 0.01
         measured = idle
         while not stop.is_set() and time.monotonic() < deadline:
@@ -501,7 +514,10 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                 if not process_present:
                     level = None
                 elif level is None:
-                    level = duty
+                    # Game opened before the base: a weak continuous load would take half
+                    # the GPU time at low power, keep the total under the base and never
+                    # hand off. Work at base intensity in short turns instead.
+                    level = duty if duty >= base_intensity/2 else base_intensity
                 counters = process_cpu_times(process) if process_present and trigger.uses_cpu else None
                 ready = False
                 if process:
@@ -545,6 +561,13 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                         state = 'Relevo adaptativo: ajustando nuestra aportación'
                     elif abs(measured-target) <= max(10,target*.05):
                         state = 'Base aproximada alcanzada; puedes iniciar el juego'
+                # What the player should do now. Once reached, the base stays "reached"
+                # so the notice does not flicker with the noise of the readings.
+                base_reached = base_reached or abs(measured-target) <= max(10, target*.05)
+                phase = 'relevo' if process_present else 'base' if base_reached else 'subiendo'
+                if phase != shown_phase:
+                    messages.put(('phase', phase))
+                    shown_phase = phase
                 messages.put(('sample', (measured, temp, duty, max(0, deadline-now), state)))
                 sample_at = time.monotonic() + 0.5
             if duty <= 0:
@@ -628,7 +651,8 @@ HELP = {
               'prudente de la aplicación, no un límite oficial.',
     'vram_c': 'Si la memoria de la GPU llega a esta temperatura, GPU Watts empieza a retirar su carga. Es un valor '
               'prudente de la aplicación, no un límite oficial.',
-    'start': 'Empieza a subir la carga hacia la base. Espera a «Base aproximada alcanzada» y entonces abre el juego.',
+    'start': 'Empieza a subir la carga hacia la base. Espera al aviso verde «ABRE EL JUEGO AHORA» (con un pitido) '
+             'y entonces abre el juego.',
     'stop': 'Retira la carga poco a poco (según la Suavidad) y para. También con Esc o cerrando la ventana.',
     'force': 'Cierra al instante, sin retirada gradual. Solo si algo va mal.',
     'sim_watts': 'SOLO SIMULACIÓN. Cuánto gastaría el juego de mentira cuando ya está jugando (tras 6 s de pantalla '
@@ -728,7 +752,7 @@ def main(simulate=False):
     ttk.Label(header, text='GPU Watts', font=('Segoe UI', 22, 'bold')).pack(side='left')
     ttk.Label(header, text='Sube la tarjeta a una base antes del juego y se retira cuando el juego coge el consumo.',
               style='Hint.TLabel').pack(side='left', padx=14, pady=(10, 0))
-    ttk.Label(box, text='Cómo se usa:   1. Elige el juego   →   2. Pulsa INICIAR   →   3. Con «Base aproximada alcanzada», abre el juego.',
+    ttk.Label(box, text='Cómo se usa:   1. Elige el juego   →   2. Pulsa INICIAR   →   3. Con el aviso verde «ABRE EL JUEGO AHORA», ábrelo.',
               font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(4, 14))
     columns = ttk.Frame(box)
     columns.pack(fill='both', expand=True)
@@ -901,6 +925,25 @@ def main(simulate=False):
     buttons.pack(fill='x', pady=(0, 12))
     state_box = ttk.LabelFrame(right, text='Estado (lecturas simuladas)' if simulate else 'Estado', padding=(12, 8), style='Step.TLabelframe')
     state_box.pack(fill='both', expand=True)
+    # Big notice of what to do now: wait, open the game, or the handoff is under way.
+    banner = tk.Label(right, justify='center', padx=10, pady=10, wraplength=340)
+    plain_title = root.title()
+    def show_phase(phase):
+        root.title(plain_title)
+        if phase is None:
+            banner.pack_forget()
+            return
+        if phase == 'base':
+            text = ('▶  ABRE EL JUEGO AHORA\nLa base está puesta: lánzalo desde Steam o su acceso directo.' if watching
+                    else 'BASE ALCANZADA\nNo hay juego vigilado: no habrá relevo.')
+            banner.configure(text=text, bg='#1e7d32', fg='#ffffff', font=('Segoe UI', 15, 'bold'))
+            root.title('▶ ABRE EL JUEGO AHORA · ' + plain_title)
+            root.bell()
+        elif phase == 'subiendo':
+            banner.configure(text='Subiendo a la base…\nTodavía NO abras el juego.', bg='#fff3e0', fg='#8a4b00', font=('Segoe UI', 12, 'bold'))
+        else:
+            banner.configure(text='Juego detectado\nGPU Watts se va retirando poco a poco.', bg='#e3f2fd', fg='#0d47a1', font=('Segoe UI', 12, 'bold'))
+        banner.pack(fill='x', pady=(0, 12), before=state_box)
     reading = tk.StringVar(value='Sin carga')
     temperature_text = tk.StringVar(value='Core: —   VRAM: —')
     status = tk.StringVar(value='Listo. Elige el juego y pulsa INICIAR.')
@@ -1054,6 +1097,7 @@ def main(simulate=False):
     steam_button.configure(command=open_steam)
     stop, messages = threading.Event(), queue.Queue()
     worker = None
+    watching = False
     closing = False
     def enable(running):
         start_button.configure(state='disabled' if running else 'normal')
@@ -1078,7 +1122,7 @@ def main(simulate=False):
         if not running:
             update_modes()
     def start():
-        nonlocal worker
+        nonlocal worker, watching
         try:
             values = [float(e.get().replace(',', '.')) for e in fields]
             validate(*values[:3])
@@ -1107,6 +1151,7 @@ def main(simulate=False):
             return
         stop.clear()
         enable(True)
+        watching = bool(watched)
         status.set('Preparando…')
         summary_text.set('')
         if watched:
@@ -1151,6 +1196,8 @@ def main(simulate=False):
                 watts, temp, duty, left, state = value
                 reading.set(f'{watts:.0f} W  ·  {temp} °C  ·  {left:.1f} s restantes')
                 status.set(f'{state} · actividad programada {duty*100:.0f}%')
+            elif kind == 'phase':
+                show_phase(value)
             elif kind == 'watch':
                 watch_text.set(value)
             elif kind == 'summary':
@@ -1160,6 +1207,7 @@ def main(simulate=False):
             else:
                 status.set(value)
                 if kind == 'done':
+                    show_phase(None)
                     reading.set('Sin carga generada por GPU Watts')
                     enable(False)
         if closing and (worker is None or not worker.is_alive()):

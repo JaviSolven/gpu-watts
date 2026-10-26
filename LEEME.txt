@@ -311,3 +311,29 @@ Nombres que cambian respecto a lo explicado más arriba:
   «Espera inicial tras detectar proceso»  → «Espera inicial (s)»
   «Iniciar retirada si core/VRAM alcanza» → «Retirar si core/VRAM llega a (°C)»
 Los ajustes de los juegos guardados antes de este cambio se siguen cargando.
+
+JUEGO ABIERTO DEMASIADO PRONTO (CORRECCIÓN TRAS LA 1.0)
+Con la carga continua, si el juego aparecía antes de alcanzar la base, el
+programa se quedaba con una carga mínima SIN pausas: se llevaba la mitad del
+tiempo de la GPU haciendo casi nada, el total quedaba por debajo de la base, el
+relevo no terminaba nunca y le quitaba FPS al juego hasta agotar el tiempo.
+Ahora:
+- Si el juego aparece antes de la base, la aportación trabaja a la intensidad
+  aproximada de la base pero en turnos cortos: el juego tiene casi toda la GPU,
+  el total sube a lo que gasta el juego y el relevo termina. Ojo: en ese caso no
+  hay colchón, porque la base aún no estaba puesta. Espera siempre a «Base
+  aproximada alcanzada» antes de abrir el juego.
+- En el modo adaptativo, si el juego YA está abierto al pulsar INICIAR, no se
+  carga nada: el salto desde reposo ya ocurrió. El aviso dice que lo cierres,
+  pulses INICIAR y lo abras con la base alcanzada.
+- Los turnos muy pequeños ya no tienen un mínimo de ~6 %: sale el pedido.
+
+AVISO «ABRE EL JUEGO AHORA» (CAMBIO TRAS LA 1.0)
+Encima del estado aparece un aviso grande que dice qué hacer en cada momento:
+- Naranja «Subiendo a la base… Todavía NO abras el juego».
+- Verde «▶ ABRE EL JUEGO AHORA» cuando la base está puesta. Suena un pitido de
+  Windows y el título de la ventana cambia a «▶ ABRE EL JUEGO AHORA», que se ve
+  también en la barra de tareas aunque estés en Steam.
+- Azul «Juego detectado: GPU Watts se va retirando poco a poco» durante el relevo.
+Al terminar, el aviso desaparece. Sin juego vigilado, el verde dice solo «BASE
+ALCANZADA» (no habrá relevo).

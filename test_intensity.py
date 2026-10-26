@@ -41,13 +41,15 @@ class IntensityTests(unittest.TestCase):
         self.assertEqual(stop.waits, [])
     def test_shared_units_add_up_short_gaps_before_waiting(self):
         compute, stop, pacer = RecordingCompute(), RecordingStop(), app.Pacer()
-        for _ in range(2):
+        for _ in range(3):
             pacer.unit(compute, .3, .6, stop, 10**9)
-        self.assertEqual(compute.calls, [('batch', .6), ('drain',)]*2)
-        self.assertEqual(stop.waits, [])  # 2 × 6 ms owed: still too short to wait
+        self.assertEqual(compute.calls, [('batch', .6), ('drain',)]*3)
+        self.assertEqual(stop.waits, [])  # gaps of 6 ms are added up, not waited one by one
         pacer.unit(compute, .3, .6, stop, 10**9)
-        # Half our turn: the gap owed equals the work done, 3 units = 18 ms.
+        # Half our turn: the gap owed equals the work done, 3 units = 18 ms,
+        # and no unit runs while it is owed.
         self.assertAlmostEqual(stop.waits[0], .018)
+        self.assertEqual(len(compute.calls), 6)
     def test_coarse_windows_waits_keep_the_requested_share(self):
         class CoarseStop:
             """Like Windows at its default timer: every wait lasts whole 15.6 ms ticks."""
@@ -64,6 +66,24 @@ class IntensityTests(unittest.TestCase):
                 stop.clock += .006  # the unit itself
         busy = 2000*.006
         self.assertAlmostEqual(busy/stop.clock, .94, delta=.02)
+    def test_tiny_turn_is_kept_tiny(self):
+        class CoarseStop:
+            def __init__(self):
+                self.clock = 0.0
+            def wait(self, seconds):
+                self.clock += math.ceil(seconds/.0156)*.0156
+        stop, pacer = CoarseStop(), app.Pacer()
+        class Compute(RecordingCompute):
+            units = 0
+            def batch(self, intensity):
+                self.units += 1
+                stop.clock += .006
+        compute = Compute()
+        with patch.object(app.time, 'monotonic', lambda: stop.clock):
+            while stop.clock < 60:
+                pacer.unit(compute, .012*.8, .8, stop, 10**9)
+        # 1.2 % of the time, not the ~6 % floor of one unit per 0.1 s wait.
+        self.assertAlmostEqual(compute.units*.006/stop.clock, .012, delta=.003)
     def test_back_to_continuous_forgets_owed_gap(self):
         compute, stop, pacer = RecordingCompute(), RecordingStop(), app.Pacer()
         pacer.unit(compute, .3, .6, stop, 10**9)
@@ -81,15 +101,26 @@ class IntensityTests(unittest.TestCase):
         obj.memory_passes(1)
         self.assertEqual(grids, [1])
     def test_run_load_keeps_level_only_while_game_is_open(self):
-        for names, expected in [({'game.exe'}, .01), (set(), None)]:
+        # Base 100 W from 40 W idle under a 360 W limit: base intensity (100-40)/(360-40).
+        for names, expected in [({'game.exe'}, (100-40)/(360-40)), (set(), None)]:
             seen = []
             q = queue.Queue()
             def unit(pacer, compute, duty, level, stop, until):
                 seen.append(level)
-            with patch.object(app, 'Compute', FakeCompute), patch.object(app, 'process_names', return_value=names), patch.object(app.Pacer, 'unit', unit):
+            # Not open when INICIAR checks; it appears at the first sample, before the base.
+            listing = iter([set()] + [names]*10**6)
+            with patch.object(app, 'Compute', FakeCompute), patch.object(app, 'process_names', side_effect=lambda: next(listing)), patch.object(app.Pacer, 'unit', unit):
                 app.run_load(FakeTelemetry(), 0, 100, .05, 75, threading.Event(), q, process='game.exe', sensors=FakeSensors(), trigger=Cutover(ADAPTIVE_MODE, hold=60, grace=60))
             self.assertTrue(seen)
             self.assertTrue(all(level == expected for level in seen), seen[:3])
+    def test_adaptive_does_not_preload_a_game_already_open(self):
+        q = queue.Queue()
+        FakeCompute.instances.clear()
+        with patch.object(app, 'Compute', FakeCompute), patch.object(app, 'process_names', return_value={'GAME.exe'}):
+            app.run_load(FakeTelemetry(), 0, 100, 5, 75, threading.Event(), q, process='game.exe', sensors=FakeSensors(), trigger=Cutover(ADAPTIVE_MODE))
+        self.assertFalse(FakeCompute.instances)
+        self.assertTrue(any(k == 'done' and 'ya está abierto' in v for k, v in q.queue))
+        self.assertNotIn(('autoclose', True), list(q.queue))
 
 
 if __name__ == '__main__':

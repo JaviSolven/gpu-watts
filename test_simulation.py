@@ -2,8 +2,10 @@ import queue
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import gpu_watts as app
 import simulation as sim
+from cutover import Cutover, ADAPTIVE_MODE
 
 
 def settled(gpu):
@@ -66,13 +68,27 @@ class SimulationTests(unittest.TestCase):
         launcher = sim.SimulatedGpu.game_executables(dict(installed)['Juego de ejemplo con lanzador'])
         self.assertEqual(launcher[0][0], 'JuegoEjemplo-Win64-Shipping.exe')
         self.assertEqual(sim.SimulatedGpu.game_executables(sim.STEAM_ROOT / 'otro'), [])
+    def test_game_opened_before_the_base_still_hands_off(self):
+        # The case from the screenshot: base 300 W, game 320 W, opened right after INICIAR.
+        gpu, q = sim.SimulatedGpu(), queue.Queue()
+        gpu.open_game('steelnomad.exe', 320)
+        listing = iter([set()] + [{'steelnomad.exe'}]*10**6)
+        with patch.object(sim, 'LOADING', .5):
+            app.run_load(gpu, 0, 300, 12, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(),
+                         trigger=Cutover(ADAPTIVE_MODE, hold=1, grace=0), ramp_seconds=1,
+                         make_compute=gpu.compute, processes=lambda: next(listing))
+        self.assertTrue(any(k == 'done' and v.startswith('Relevo:') for k, v in q.queue), [v for k, v in q.queue if k == 'done'])
+        self.assertIn(('autoclose', True), list(q.queue))
+        self.assertEqual([v for k, v in q.queue if k == 'phase'], ['relevo'])
     def test_run_load_reaches_towards_the_base(self):
         gpu, q = sim.SimulatedGpu(), queue.Queue()
-        app.run_load(gpu, 0, 150, 3, 75, threading.Event(), q, sensors=gpu.sensors(), make_compute=gpu.compute, processes=gpu.processes)
+        app.run_load(gpu, 0, 100, 3, 75, threading.Event(), q, sensors=gpu.sensors(), make_compute=gpu.compute, processes=gpu.processes)
         watts = [v[0] for k, v in q.queue if k == 'sample']
         self.assertIn(('done', 'Tiempo completado'), list(q.queue))
-        self.assertGreater(max(watts), sim.IDLE + 40)
-        self.assertLess(max(watts), 150 + 30)
+        # The notice goes from "wait" to "open the game now", once each.
+        self.assertEqual([v for k, v in q.queue if k == 'phase'], ['subiendo', 'base'])
+        self.assertGreater(max(watts), 100 - 10)
+        self.assertLess(max(watts), 100 + 30)
 
 
 if __name__ == '__main__':
