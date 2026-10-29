@@ -38,6 +38,8 @@ class SimulatedGpu:
     devices = [(None, 'RTX 5080 SIMULADA (no carga ninguna tarjeta)', 'GPU-simulada')]
 
     def __init__(self, seed=1):
+        # Like a GeForce (the RTX 5080 included): the driver gives no VRAM temperature.
+        self.vram_by_driver = False
         self.lock = threading.Lock()
         self.units = collections.deque()  # (finished at, seconds, intensity)
         self.game = None                  # (exe, opened at, watts)
@@ -134,7 +136,12 @@ class SimulatedSensors:
     def __init__(self, gpu, monitor_vram=True):
         self.gpu, self.monitor_vram = gpu, monitor_vram
 
+    def memory_temperature(self):
+        return round(self.gpu.core+7.5, 1) if self.gpu.vram_by_driver else None
+
     def read(self):
         core = round(self.gpu.core, 1)
-        memory = round(core+7.5, 1) if self.monitor_vram else None
+        memory = self.memory_temperature() if self.monitor_vram else None
+        if self.monitor_vram and memory is None:
+            raise RuntimeError('Tu tarjeta no da la temperatura de la VRAM por «NVIDIA directo».')
         return check_temperatures((core, memory), require_memory=self.monitor_vram)

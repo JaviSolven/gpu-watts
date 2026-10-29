@@ -382,3 +382,11 @@ JUEGOS QUE NO SON DE STEAM (CAMBIO TRAS LA 1.0)
   juego con el nombre de su carpeta.
 Los procesos se reconocen por el nombre del .exe, no por la carpeta: si dos
 juegos distintos tienen un .exe con el mismo nombre, para GPU Watts son el mismo.
+
+DETECCIÓN DE LA VRAM (CAMBIO TRAS LA 1.0)
+Al abrir (y al cambiar de tarjeta), GPU Watts pregunta al controlador si da la
+temperatura de la VRAM. En las GeForce, como la RTX 5080, no la da: entonces
+«NVIDIA directo» no aparece en la lista, queda elegido «NVIDIA solo core» y una
+nota lo explica. Para vigilar también la VRAM en esas tarjetas, «CSV HWiNFO».
+En una tarjeta que sí la da, las tres opciones siguen como antes. La simulación
+se comporta como la 5080.

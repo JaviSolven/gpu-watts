@@ -51,22 +51,28 @@ class NativeSensors:
                 temps.append(value.value)
             except RuntimeError:
                 temps.append(None)
-        memory = None
-        if self.monitor_vram and self.getfields:
-            field = Field()
-            field.fieldId = 82  # NVML_FI_DEV_MEMORY_TEMP
-            if self.getfields(self.handle, 1, C.byref(field)) == 0 and field.nvmlReturn == 0:
-                names = {0:'dVal', 1:'uiVal', 2:'ulVal', 3:'ullVal', 4:'sllVal', 5:'siVal', 6:'usVal'}
-                if field.valueType in names:
-                    memory = float(getattr(field.value, names[field.valueType]))
-                # Reject a stale cached field when NVML supplies a timestamp.
-                if field.timestamp <= 0 or abs(time.time() - field.timestamp/1e6) > 5:
-                    memory = None
+        memory = self.memory_temperature() if self.monitor_vram else None
         if self.monitor_vram and memory is None:
             # Usual on GeForce cards: the driver gives the core temperature only.
             raise RuntimeError('Tu tarjeta no da la temperatura de la VRAM por «NVIDIA directo». Elige en el paso 4 '
                                '«NVIDIA solo core» (sin vigilar la VRAM) o «CSV HWiNFO» para vigilarla con HWiNFO.')
         return check_temperatures((*temps, memory), require_memory=self.monitor_vram)
+
+    def memory_temperature(self):
+        """VRAM temperature from the driver, or None when the card does not give it (GeForce)."""
+        if not self.getfields:
+            return None
+        field = Field()
+        field.fieldId = 82  # NVML_FI_DEV_MEMORY_TEMP
+        if self.getfields(self.handle, 1, C.byref(field)) != 0 or field.nvmlReturn != 0:
+            return None
+        names = {0:'dVal', 1:'uiVal', 2:'ulVal', 3:'ullVal', 4:'sllVal', 5:'siVal', 6:'usVal'}
+        if field.valueType not in names:
+            return None
+        # Reject a stale cached field when NVML supplies a timestamp.
+        if field.timestamp <= 0 or abs(time.time() - field.timestamp/1e6) > 5:
+            return None
+        return float(getattr(field.value, names[field.valueType]))
 
 
 class CsvSensors:

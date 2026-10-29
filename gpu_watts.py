@@ -878,7 +878,8 @@ def main(simulate=False):
     label(section, 'Fuente de temperatura', 'source', 1, 0)
     source_row = ttk.Frame(section)
     source_row.grid(row=1, column=1, columnspan=3, sticky='ew', pady=4)
-    sources = ['NVIDIA directo', 'CSV HWiNFO', 'NVIDIA solo core (sin vigilancia VRAM)']
+    direct, csv_source, only_core_source = 'NVIDIA directo', 'CSV HWiNFO', 'NVIDIA solo core (sin vigilancia VRAM)'
+    sources = [direct, csv_source, only_core_source]
     source_box = ttk.Combobox(source_row, state='readonly', values=sources, width=36)
     # A setting of this PC, not of a game: remembered between sessions.
     source_box.set(store.prefs.get('source') if store.prefs.get('source') in sources else sources[0])
@@ -914,6 +915,29 @@ def main(simulate=False):
         csv_widgets += [name, selector]
     core_name, core_entry = field(section, 'Retirar si core llega a (°C)', 'core_c', '75', 4)
     _, vram_c_entry = field(section, 'Retirar si VRAM llega a (°C)', 'vram_c', '85', 4, 2)
+    vram_note = ttk.Label(section, style='Hint.TLabel', wraplength=520, text=(
+        'Tu tarjeta no da la temperatura de la VRAM por el controlador (lo normal en las GeForce): se vigila solo '
+        'el core. Para vigilar también la VRAM, usa «CSV HWiNFO».'))
+    vram_note.grid(row=5, column=0, columnspan=4, sticky='w', pady=(4, 0))
+    def driver_gives_vram():
+        handle = telemetry.devices[gpu.current()][0]
+        try:
+            sensors = telemetry.sensors() if simulate else NativeSensors(telemetry, handle)
+            return sensors.memory_temperature() is not None
+        except Exception:
+            return False
+    def offer_sources(_=None):
+        # Do not offer «NVIDIA directo» on a card where it can only fail.
+        usable = sources if driver_gives_vram() else [only_core_source, csv_source]
+        source_box.configure(values=usable)
+        if source_box.get() not in usable:
+            source_box.set(usable[0])
+        if direct in usable:
+            vram_note.grid_remove()
+        else:
+            vram_note.grid()
+        update_sensor_mode()
+    gpu.bind('<<ComboboxSelected>>', offer_sources)
     # Same order as before the redesign: saved games keep their settings.
     fields = [base_entry, duration_entry, core_entry, vram_c_entry]
     trigger_fields = [gpu_w_entry, cpu_entry, hold_entry, grace_entry, smooth_entry]
@@ -1005,7 +1029,7 @@ def main(simulate=False):
         ttk.Label(sim_box, textvariable=sim_text, wraplength=340).pack(anchor='w', pady=(6, 0))
 
     def update_sensor_mode(_=None):
-        only_core = source_box.current() == 2
+        only_core = source_box.get() == only_core_source
         csv = source_box.get() == 'CSV HWiNFO'
         if str(source_box.cget('state')) != 'disabled':
             vram_c_entry.configure(state='disabled' if only_core else 'normal')
@@ -1197,9 +1221,9 @@ def main(simulate=False):
                     raise ValueError('Elige un CSV activo y sus dos columnas de temperatura.')
                 source = CsvSensors(csv_path.get(), [s.current() for s in column_boxes])
             elif simulate:
-                source = telemetry.sensors(monitor_vram=source_box.current() != 2)
+                source = telemetry.sensors(monitor_vram=source_box.get() != only_core_source)
             else:
-                source = NativeSensors(telemetry, telemetry.devices[gpu.current()][0], monitor_vram=source_box.current() != 2)
+                source = NativeSensors(telemetry, telemetry.devices[gpu.current()][0], monitor_vram=source_box.get() != only_core_source)
             typed = process_box.get().strip().strip('"')
             watched = normalized_process(typed)
             process_box.set(watched)  # a pasted path is shown as the name actually watched
@@ -1288,6 +1312,7 @@ def main(simulate=False):
             return
         root.after(100, poll)
     # Open ready for the last game used.
+    offer_sources()
     update_modes()
     show_phase(None)
     refresh_games(store.last)

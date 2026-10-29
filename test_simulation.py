@@ -52,9 +52,14 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual([u[2] for u in gpu.units], [1/sim.SMS, 1])
     def test_sensors(self):
         gpu = sim.SimulatedGpu()
+        # Like the RTX 5080: no VRAM from the driver, so «NVIDIA directo» fails and core only works.
+        self.assertIsNone(gpu.sensors().memory_temperature())
+        with self.assertRaisesRegex(RuntimeError, 'VRAM'):
+            gpu.sensors().read()
+        self.assertIsNone(gpu.sensors(monitor_vram=False).read()[1])
+        gpu.vram_by_driver = True  # a card that does give it
         core, memory = gpu.sensors().read()
         self.assertEqual(memory, core+7.5)
-        self.assertIsNone(gpu.sensors(monitor_vram=False).read()[1])
     def test_simulated_steam_library(self):
         installed = sim.SimulatedGpu.steam_games()
         names = [name for name, _ in installed]
@@ -74,7 +79,7 @@ class SimulationTests(unittest.TestCase):
         gpu.open_game('steelnomad.exe', 320)
         listing = iter([set()] + [{'steelnomad.exe'}]*10**6)
         with patch.object(sim, 'LOADING', .5):
-            app.run_load(gpu, 0, 300, 12, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(),
+            app.run_load(gpu, 0, 300, 12, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(monitor_vram=False),
                          trigger=Cutover(ADAPTIVE_MODE, hold=1, grace=0), ramp_seconds=1,
                          make_compute=gpu.compute, processes=lambda: next(listing))
         self.assertTrue(any(k == 'done' and v.startswith('Relevo:') for k, v in q.queue), [v for k, v in q.queue if k == 'done'])
@@ -88,7 +93,7 @@ class SimulationTests(unittest.TestCase):
                 gpu.open_game('steelnomad.exe', 320)
             return gpu.processes()
         with patch.object(sim, 'LOADING', .5):
-            app.run_load(gpu, 0, 200, 20, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(),
+            app.run_load(gpu, 0, 200, 20, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(monitor_vram=False),
                          trigger=Cutover(ADAPTIVE_MODE, hold=.5, grace=0), ramp_seconds=1,
                          make_compute=gpu.compute, processes=processes)
         events = list(q.queue)
@@ -115,14 +120,14 @@ class SimulationTests(unittest.TestCase):
                 gpu.open_game('steelnomad.exe', 240)
             return gpu.processes()
         with patch.object(sim, 'LOADING', .5):
-            app.run_load(gpu, 0, 260, 30, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(),
+            app.run_load(gpu, 0, 260, 30, 75, threading.Event(), q, process='steelnomad.exe', sensors=gpu.sensors(monitor_vram=False),
                          trigger=Cutover(ADAPTIVE_MODE, hold=1, grace=0), ramp_seconds=2,
                          make_compute=gpu.compute, processes=processes)
         self.assertTrue(any(k == 'done' and v.startswith('Relevo:') for k, v in q.queue), [v for k, v in q.queue if k == 'done'])
         self.assertIn(('autoclose', True), list(q.queue))
     def test_run_load_reaches_towards_the_base(self):
         gpu, q = sim.SimulatedGpu(), queue.Queue()
-        app.run_load(gpu, 0, 100, 3, 75, threading.Event(), q, sensors=gpu.sensors(), make_compute=gpu.compute, processes=gpu.processes)
+        app.run_load(gpu, 0, 100, 3, 75, threading.Event(), q, sensors=gpu.sensors(monitor_vram=False), make_compute=gpu.compute, processes=gpu.processes)
         watts = [v[0] for k, v in q.queue if k == 'sample']
         self.assertIn(('done', 'Tiempo completado'), list(q.queue))
         # The notice goes from "wait" to "open the game now", once each.

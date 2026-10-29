@@ -91,6 +91,7 @@ class SensorTests(unittest.TestCase):
                 C.cast(ptr,C.POINTER(C.c_uint)).contents.value = 45
         with self.assertRaisesRegex(RuntimeError, 'NVIDIA solo core'):
             NativeSensors(Telemetry(), None).read()
+        self.assertIsNone(NativeSensors(Telemetry(), None).memory_temperature())
     def test_missing_memory_requires_explicit_opt_out(self):
         with self.assertRaises(RuntimeError):
             check_temperatures((45,None), (75,85))
