@@ -109,16 +109,25 @@ class AdaptiveHandoff:
     than that would keep us supporting it until the time limit, so once the
     game's own part (estimated by the caller) reaches TAKEOVER of the base
     for a second it is really playing, not loading: from then on we only
-    withdraw, and the handoff ends when our load reaches zero."""
-    TAKEOVER, TAKEOVER_SECONDS = .7, 1.0
+    withdraw, and the handoff ends when our load reaches zero.
 
-    def __init__(self, target, ramp_seconds=5, hold=2, grace=2):
+    With `watch` seconds, after taking over we stay watching that long from the
+    game's appearance: a deep fall of the game's part (a loading screen, under
+    REARM of the base) brings support back, so the next jump (into the level)
+    starts from the base again. The handoff cannot end before the watch does."""
+    TAKEOVER, TAKEOVER_SECONDS, REARM = .7, 1.0, .5
+
+    def __init__(self, target, ramp_seconds=5, hold=2, grace=2, watch=0):
         self.target = target
         self.ramp_seconds = max(.5, ramp_seconds)
-        self.hold, self.grace = hold, grace
+        self.hold, self.grace, self.watch = hold, grace, watch
         self.first_seen = self.previous_time = self.since = None
         self.ceiling = None
         self.game_since, self.committed = None, False
+        self.played = False  # the game took over at least once (kept if it closes)
+
+    def watching(self, now):
+        return self.watch > 0 and self.first_seen is not None and now-self.first_seen < self.watch
 
     def update(self, now, present, measured, duty, power_limit, game_watts=None):
         if not present:
@@ -138,6 +147,9 @@ class AdaptiveHandoff:
             self.committed = self.committed or now-self.game_since >= self.TAKEOVER_SECONDS
         else:
             self.game_since = None
+        if self.committed and self.watching(now) and game_watts is not None and game_watts < self.REARM*self.target:
+            self.committed, self.game_since = False, None
+        self.played = self.played or self.committed
         max_step = self.ceiling*dt/self.ramp_seconds
         low = self.target*.95
         error = self.target-measured
@@ -154,7 +166,7 @@ class AdaptiveHandoff:
             duty = min(self.ceiling,duty+min(max_step,wanted))
         if duty < .000001:
             duty = 0.0
-        ready = duty == 0 and (measured >= low or self.committed) and now-self.first_seen >= self.grace
+        ready = duty == 0 and (measured >= low or self.committed) and now-self.first_seen >= max(self.grace, self.watch)
         if ready:
             if self.since is None:
                 self.since = now
@@ -162,7 +174,9 @@ class AdaptiveHandoff:
             self.since = None
         confirmed = self.since is not None and now-self.since >= self.hold
         text = f'Relevo adaptativo · GPU total {measured:.0f}/{self.target:.0f} W · aportación programada {duty*100:.1f}%'
-        if self.committed:
+        if self.watching(now):
+            text += f' · vigilando {self.watch-(now-self.first_seen):.0f} s más'
+        elif self.committed:
             text += ' · el juego ya juega: retirada definitiva'
         if self.since is not None:
             text += f' · sin carga propia {now-self.since:.1f}/{self.hold:g} s'

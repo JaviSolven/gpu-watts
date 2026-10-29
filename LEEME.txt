@@ -390,3 +390,23 @@ temperatura de la VRAM. En las GeForce, como la RTX 5080, no la da: entonces
 nota lo explica. Para vigilar también la VRAM en esas tarjetas, «CSV HWiNFO».
 En una tarjeta que sí la da, las tres opciones siguen como antes. La simulación
 se comporta como la 5080.
+
+VIGILAR TRAS ABRIR EL JUEGO (CAMBIO TRAS LA 1.0)
+Algunos juegos hacen menú (consumo alto) → pantalla de carga (bajo) → partida
+(salto). Sin vigilar, GPU Watts se retira y termina en el menú, y el salto al
+entrar con el personaje parte de la pantalla de carga, sin colchón.
+Paso 3, «Vigilar tras abrir el juego (s)» (solo en el relevo adaptativo):
+- 0 = como siempre: termina en cuanto el juego coge el consumo.
+- Más de 0 (por ejemplo 180): se queda ese tiempo desde que se abre el juego.
+  Mientras el juego consume, GPU Watts está a 0 % y el aviso dice «Vigilando el
+  juego». Si la parte del juego cae por debajo de la mitad de la base (pantalla
+  de carga), vuelve a subir poco a poco hasta la base («Consumo bajo»); cuando
+  el juego vuelve a consumir, se retira otra vez. Al acabar el tiempo se retira
+  y termina. Si cierras el juego mientras vigila, también termina.
+- El «Tiempo máximo» se amplía solo si no da para la vigilancia.
+- La caída del menú a la pantalla de carga se nota 1-2 s tarde (la lectura
+  promedia ~1 s) y la subida es gradual (Suavidad): una pantalla de carga muy
+  corta puede no dar tiempo a llegar a la base.
+Cada juego guarda su propio valor. En la simulación, «Tipo de juego» → «Menú,
+carga y juego» (6 s de carga, 12 s de menú, 8 s de carga y a jugar) sirve para
+verlo.

@@ -12,7 +12,7 @@ import time
 from sensors import NativeSensors, CsvSensors, check_temperatures
 from cutover import Cutover, MODES, read_cpu_times, AdaptiveHandoff, ADAPTIVE_MODE
 from games import GameStore, steam_games, game_executables, game_name
-from simulation import SimulatedGpu
+from simulation import SimulatedGpu, PROFILES as SIM_PROFILES
 
 P = C.c_void_p
 U = C.c_uint
@@ -449,7 +449,7 @@ def ramp_down(compute, initial_duty, seconds, telemetry, handle, sensors, cutoff
         pacer.unit(compute, duty, level, stop, started+seconds)
 
 
-def run_load(telemetry, device, target, duration, cutoff, stop, messages, process='', close_on_process=True, sensors=None, mem_cutoff=85, mode='Core', vram_mb=512, trigger=None, ramp_seconds=0, make_compute=None, processes=None):
+def run_load(telemetry, device, target, duration, cutoff, stop, messages, process='', close_on_process=True, sensors=None, mem_cutoff=85, mode='Core', vram_mb=512, trigger=None, ramp_seconds=0, make_compute=None, processes=None, watch_seconds=0):
     # make_compute/processes replace CUDA and the Windows process list in simulation.
     processes = processes or process_names
     compute = None
@@ -464,7 +464,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
         if not math.isfinite(ramp_seconds) or not 0 <= ramp_seconds <= 30:
             raise ValueError('La retirada gradual debe durar entre 0 y 30 segundos.')
         trigger = trigger or Cutover(mode='Al aparecer')
-        adaptive = AdaptiveHandoff(target,ramp_seconds,trigger.hold,trigger.grace) if trigger.mode == ADAPTIVE_MODE else None
+        adaptive = AdaptiveHandoff(target,ramp_seconds,trigger.hold,trigger.grace,watch_seconds) if trigger.mode == ADAPTIVE_MODE else None
         already_open = bool(process) and process in {n.casefold() for n in processes()}
         if already_open and trigger.mode == 'Al aparecer':
             detected = True
@@ -509,7 +509,7 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
         deadline = start + duration
         sample_at = start
         pacer = Pacer()
-        base_reached, shown_phase = False, None
+        base_reached, shown_phase, watch_extended = False, None, False
         # Watts we add per unit of duty, learnt before the game while every watt
         # above idle is ours. The driver only reports the whole board, so with the
         # game open our part is this times the duty of the last half second.
@@ -523,6 +523,15 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                 messages.put(('temperatures', temperatures))
                 measured, temp, limit = telemetry.read(h)
                 process_present = bool(process) and process in {n.casefold() for n in processes()}
+                if adaptive is not None and adaptive.played and not process_present:
+                    # The player closed the game while we were watching: nothing left to cushion.
+                    detected = True
+                    reason = f'Relevo: {process} · el juego se ha cerrado durante la vigilancia'
+                    break
+                if adaptive is not None and watch_seconds and process_present and not watch_extended:
+                    # The time limit must not cut the watch short.
+                    deadline = max(deadline, now + watch_seconds + 30)
+                    watch_extended = True
                 if not process_present:
                     level = None
                 elif level is None:
@@ -582,6 +591,8 @@ def run_load(telemetry, device, target, duration, cutoff, stop, messages, proces
                 # so the notice does not flicker with the noise of the readings.
                 base_reached = base_reached or abs(measured-target) <= max(10, target*.05)
                 phase = 'relevo' if process_present else 'base' if base_reached else 'subiendo'
+                if process_present and adaptive is not None and adaptive.watching(time.monotonic()):
+                    phase = 'vigilando' if adaptive.committed else 'sosteniendo'
                 if phase != shown_phase:
                     messages.put(('phase', phase))
                     shown_phase = phase
@@ -670,6 +681,12 @@ HELP = {
     'cpu': 'Solo modos clásicos: uso de CPU del juego, en % del equipo entero, a partir del cual se da el relevo. '
            'Con 16 hilos, un hilo al 100 % es ~6 %.',
     'close': 'Al terminar el relevo, GPU Watts se cierra solo. Si no se cierra, el estado dice por qué paró.',
+    'watch': 'Para juegos con menú → pantalla de carga → partida. 0 = como siempre: GPU Watts termina en cuanto el '
+             'juego coge el consumo. Con más de 0 se queda vigilando ese tiempo desde que se abre el juego, sin '
+             'cargar nada mientras el juego consume. Si el consumo cae mucho (pantalla de carga: el juego por debajo '
+             'de la mitad de la base), vuelve a sostener la base para que el salto al entrar con el personaje parta '
+             'de ahí; cuando el juego vuelve a consumir, se retira otra vez. Al acabar el tiempo se retira y termina; '
+             'si cierras el juego antes, también. El tiempo máximo se amplía solo si hace falta. Ejemplo: 180.',
     'gpu': 'La tarjeta NVIDIA que se carga y se vigila.',
     'source': 'De dónde salen las temperaturas. NVIDIA directo: el controlador da core y VRAM. CSV HWiNFO: si el '
               'controlador no da la VRAM, HWiNFO puede escribir un CSV (registro cada 0,5–1 s) y se leen de ahí; '
@@ -695,6 +712,9 @@ HELP = {
     'sim_open': 'SOLO SIMULACIÓN. Hace aparecer el «Ejecutable vigilado» del paso 1 como si hubieras abierto el juego. '
                 'Úsalo después de INICIAR, cuando arriba salga el aviso verde «ABRE EL JUEGO AHORA».',
     'sim_close': 'SOLO SIMULACIÓN. Hace desaparecer el juego de mentira, como si lo cerraras.',
+    'sim_profile': 'SOLO SIMULACIÓN. «Carga y juego»: 6 s de pantalla de carga y luego juega. «Menú, carga y juego»: '
+                   '6 s de carga, 12 s de menú que ya consume mucho, 8 s de otra pantalla de carga y luego el salto al '
+                   'entrar con el personaje. Con el segundo se ve para qué sirve «Vigilar tras abrir el juego».',
 }
 
 
@@ -856,16 +876,18 @@ def main(simulate=False):
     _, hold_entry = field(section, 'Confirmar durante (s)', 'hold', '2', 1, 2)
     classic = [*field(section, 'Umbral GPU (W)', 'gpu_w', '240', 2), *field(section, 'CPU del juego (%)', 'cpu', '10', 2, 2)]
     gpu_w_entry, cpu_entry = classic[1], classic[3]
+    adaptive_only = [*field(section, 'Vigilar tras abrir el juego (s)', 'watch', '0', 3)]
+    watch_entry = adaptive_only[1]
     close_on_process = tk.BooleanVar(value=True)
     auto_close_box = ttk.Checkbutton(section, text='Cerrar GPU Watts al terminar el relevo  ⓘ', variable=close_on_process)
-    auto_close_box.grid(row=3, column=0, columnspan=4, sticky='w', pady=(6, 0))
+    auto_close_box.grid(row=4, column=0, columnspan=4, sticky='w', pady=(6, 0))
     tip(auto_close_box, texts['close'])
     def update_trigger_mode(_=None):
+        adaptive = trigger_box.get() == ADAPTIVE_MODE
         for widget in classic:
-            if trigger_box.get() == ADAPTIVE_MODE:
-                widget.grid_remove()
-            else:
-                widget.grid()
+            widget.grid_remove() if adaptive else widget.grid()
+        for widget in adaptive_only:
+            widget.grid() if adaptive else widget.grid_remove()
     trigger_box.bind('<<ComboboxSelected>>', update_trigger_mode)
 
     # 4 · Tarjeta y temperaturas
@@ -940,7 +962,7 @@ def main(simulate=False):
     gpu.bind('<<ComboboxSelected>>', offer_sources)
     # Same order as before the redesign: saved games keep their settings.
     fields = [base_entry, duration_entry, core_entry, vram_c_entry]
-    trigger_fields = [gpu_w_entry, cpu_entry, hold_entry, grace_entry, smooth_entry]
+    trigger_fields = [gpu_w_entry, cpu_entry, hold_entry, grace_entry, smooth_entry, watch_entry]
 
     # Right column: buttons, what to do now, state and, last, the simulated game.
     buttons = ttk.Frame(right)
@@ -963,6 +985,12 @@ def main(simulate=False):
             banner.configure(text=text, bg='#1e7d32', fg='#ffffff', font=('Segoe UI', 15, 'bold'))
             root.title('▶ ABRE EL JUEGO AHORA · ' + plain_title)
             root.bell()
+        elif phase == 'vigilando':
+            banner.configure(text='Vigilando el juego\nGPU Watts no carga nada; si el consumo cae (pantalla de carga), sostendrá la base.',
+                             bg='#e0f2f1', fg='#004d40', font=('Segoe UI', 12, 'bold'))
+        elif phase == 'sosteniendo':
+            banner.configure(text='Consumo bajo (pantalla de carga)\nGPU Watts sostiene la base para el próximo salto.',
+                             bg='#ede7f6', fg='#4527a0', font=('Segoe UI', 12, 'bold'))
         elif phase == 'subiendo':
             banner.configure(text='Subiendo a la base…\nTodavía NO abras el juego.', bg='#fff3e0', fg='#8a4b00', font=('Segoe UI', 12, 'bold'))
         else:
@@ -1001,6 +1029,15 @@ def main(simulate=False):
         sim_watts.pack(side='left', padx=(6, 0))
         for widget in (sim_label, sim_watts):
             tip(widget, texts['sim_watts'])
+        profile_row = ttk.Frame(sim_box)
+        profile_row.pack(fill='x', pady=(6, 0))
+        profile_label = ttk.Label(profile_row, text='Tipo de juego  ⓘ')
+        profile_label.pack(side='left')
+        sim_profile = ttk.Combobox(profile_row, state='readonly', values=list(SIM_PROFILES), width=22)
+        sim_profile.set(SIM_PROFILES[0])
+        sim_profile.pack(side='left', padx=(6, 0))
+        for widget in (profile_label, sim_profile):
+            tip(widget, texts['sim_profile'])
         sim_buttons = ttk.Frame(sim_box)
         sim_buttons.pack(fill='x', pady=(8, 0))
         sim_text = tk.StringVar(value='Juego simulado cerrado.')
@@ -1015,11 +1052,12 @@ def main(simulate=False):
             except ValueError as exc:
                 messagebox.showerror('Simulación', str(exc))
                 return
-            telemetry.open_game(exe, watts)
-            sim_text.set(f'Abierto: {exe} · 6 s de carga, luego ~{watts:.0f} W.')
+            telemetry.open_game(exe, watts, sim_profile.get())
+            sim_text.set(f'Abierto: {exe} · {sim_profile.get().lower()}, ~{watts:.0f} W al jugar.')
         def close_sim_game():
             telemetry.close_game()
             sim_text.set('Juego simulado cerrado.')
+        sim_phase = tk.StringVar(value='')
         sim_open = ttk.Button(sim_buttons, text='Abrir juego simulado', command=open_sim_game)
         sim_open.pack(side='left')
         tip(sim_open, texts['sim_open'])
@@ -1027,6 +1065,7 @@ def main(simulate=False):
         sim_close.pack(side='left', padx=6)
         tip(sim_close, texts['sim_close'])
         ttk.Label(sim_box, textvariable=sim_text, wraplength=340).pack(anchor='w', pady=(6, 0))
+        ttk.Label(sim_box, textvariable=sim_phase, font=('Segoe UI', 10, 'bold'), wraplength=340).pack(anchor='w', pady=(2, 0))
 
     def update_sensor_mode(_=None):
         only_core = source_box.get() == only_core_source
@@ -1229,7 +1268,9 @@ def main(simulate=False):
             process_box.set(watched)  # a pasted path is shown as the name actually watched
             trigger_values = [float(e.get().replace(',', '.')) for e in trigger_fields]
             trigger = Cutover(trigger_box.get(), *trigger_values[:4]) if watched else None
-            ramp_seconds = trigger_values[4]
+            ramp_seconds, watch_seconds = trigger_values[4], trigger_values[5]
+            if not math.isfinite(watch_seconds) or not 0 <= watch_seconds <= 1800:
+                raise ValueError('Vigilar tras abrir el juego: entre 0 y 1800 segundos (0 = no vigilar).')
             if not math.isfinite(ramp_seconds) or not .5 <= ramp_seconds <= 30:
                 raise ValueError('Suavidad: entre 0,5 y 30 segundos.')
         except (ValueError, OSError, RuntimeError) as exc:
@@ -1249,6 +1290,7 @@ def main(simulate=False):
             except OSError as exc:
                 summary_text.set(f'No se pudieron guardar los ajustes del juego: {exc}')
         simulation = {'make_compute': telemetry.compute, 'processes': telemetry.processes} if simulate else {}
+        simulation['watch_seconds'] = watch_seconds if trigger_box.get() == ADAPTIVE_MODE else 0
         worker = threading.Thread(target=run_load, args=(telemetry, gpu.current(), *values[:3], stop, messages, watched, close_on_process.get(), source, *values[3:], mode_box.get(), memory_mb, trigger, ramp_seconds), kwargs=simulation, daemon=True)
         worker.start()
     def halt():
@@ -1310,6 +1352,9 @@ def main(simulate=False):
             telemetry.shutdown()
             root.destroy()
             return
+        if simulate:
+            phase_now = telemetry.game_phase(time.monotonic())
+            sim_phase.set('' if phase_now == 'cerrado' else f'El juego simulado está ahora en: {phase_now}')
         root.after(100, poll)
     # Open ready for the last game used.
     offer_sources()

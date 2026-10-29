@@ -29,13 +29,13 @@ class SimulationTests(unittest.TestCase):
         gpu = sim.SimulatedGpu()
         gpu.open_game('crimsondesert.exe', 300)
         self.assertAlmostEqual(gpu.game_demand(time.monotonic()), sim.LOADING_DEMAND)
-        gpu.game = ('crimsondesert.exe', time.monotonic()-100, 300)
+        gpu.game = ('crimsondesert.exe', time.monotonic()-100, 300, sim.DIRECT)
         watts, _, _ = settled(gpu)
         self.assertAlmostEqual(watts, 300, delta=15)
     def test_shared_gpu_time(self):
         gpu = sim.SimulatedGpu()
         gpu.units.append((time.monotonic(), sim.WINDOW, 1))
-        gpu.game = ('x.exe', time.monotonic()-100, sim.FULL)
+        gpu.game = ('x.exe', time.monotonic()-100, sim.FULL, sim.DIRECT)
         watts, _, _ = settled(gpu)
         self.assertLessEqual(watts, sim.FULL + 15)
     def test_process_list_follows_the_game(self):
@@ -125,6 +125,40 @@ class SimulationTests(unittest.TestCase):
                          make_compute=gpu.compute, processes=processes)
         self.assertTrue(any(k == 'done' and v.startswith('Relevo:') for k, v in q.queue), [v for k, v in q.queue if k == 'done'])
         self.assertIn(('autoclose', True), list(q.queue))
+    def run_menu_game(self, watch, close_after=None):
+        """Menu → loading → playing, opened at the green notice. Game phases shortened."""
+        gpu, q = sim.SimulatedGpu(), queue.Queue()
+        opened = {}
+        def processes():
+            if gpu.game is None and not opened and ('phase', 'base') in list(q.queue):
+                gpu.open_game('crimsondesert.exe', 300, sim.WITH_MENU)
+                opened['at'] = time.monotonic()
+            if close_after and opened and time.monotonic()-opened['at'] > close_after:
+                gpu.close_game()
+            return gpu.processes()
+        with patch.object(sim, 'LOADING', .5), patch.object(sim, 'MENU', 5), patch.object(sim, 'LOADING2', 4):
+            app.run_load(gpu, 0, 150, 60, 75, threading.Event(), q, process='crimsondesert.exe', sensors=gpu.sensors(monitor_vram=False),
+                         trigger=Cutover(ADAPTIVE_MODE, hold=.5, grace=0), ramp_seconds=1,
+                         make_compute=gpu.compute, processes=processes, watch_seconds=watch)
+        return list(q.queue), time.monotonic()-opened['at']
+    def test_without_watch_it_leaves_during_the_menu(self):
+        events, after = self.run_menu_game(0)
+        self.assertIn(('autoclose', True), events)
+        self.assertLess(after, .5+5)  # gone before the second loading screen: no cushion for the jump
+    def test_watch_holds_the_base_on_the_second_loading_screen(self):
+        events, after = self.run_menu_game(14)
+        phases = [v for k, v in events if k == 'phase']
+        self.assertIn('vigilando', phases)
+        self.assertIn('sosteniendo', phases[phases.index('vigilando'):])  # support came back after the menu
+        own = [v[0] for k, v in events if k == 'split' and v]
+        self.assertGreater(max(own[len(own)//2:]), 40)  # our watts rose again late in the run
+        self.assertIn(('autoclose', True), events)
+        self.assertGreaterEqual(after, 14)
+    def test_closing_the_game_while_watching_ends(self):
+        events, after = self.run_menu_game(60, close_after=7)
+        self.assertTrue(any(k == 'done' and 'cerrado durante la vigilancia' in v for k, v in events), [v for k, v in events if k == 'done'])
+        self.assertIn(('autoclose', True), events)
+        self.assertLess(after, 15)
     def test_run_load_reaches_towards_the_base(self):
         gpu, q = sim.SimulatedGpu(), queue.Queue()
         app.run_load(gpu, 0, 100, 3, 75, threading.Event(), q, sensors=gpu.sensors(monitor_vram=False), make_compute=gpu.compute, processes=gpu.processes)

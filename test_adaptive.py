@@ -86,6 +86,51 @@ class AdaptiveTests(unittest.TestCase):
             duty,ready,_=c.update(i*.5,True,240,duty,360,game_watts=60)
         self.assertEqual(duty,.6)  # still supporting at the level it had
         self.assertFalse(ready)
+    def take_over(self, c, duty=.5, start=0.0):
+        # The game plays (its part at 80 % of the base) long enough to take over.
+        for i in range(4):
+            duty,ready,_=c.update(start+i*.5,True,300,duty,360,game_watts=.8*c.target)
+        return duty
+    def test_watch_brings_support_back_on_a_loading_screen(self):
+        c=AdaptiveHandoff(200,ramp_seconds=2,hold=0,grace=0,watch=60)
+        duty=self.take_over(c)
+        self.assertTrue(c.committed)
+        self.assertTrue(c.played)
+        for i in range(8):  # menu: the game draws a lot, we go to zero
+            duty,ready,_=c.update(2+i*.5,True,250,duty,360,game_watts=230)
+        self.assertEqual(duty,0)
+        self.assertFalse(ready)  # still watching
+        # Loading screen: the game falls under half the base: support comes back.
+        for i in range(6):
+            duty,ready,text=c.update(6+i*.5,True,90,duty,360,game_watts=80)
+        self.assertFalse(c.committed)
+        self.assertGreater(duty,0)
+        self.assertIn('vigilando',text)
+    def test_no_end_while_watching_and_end_after(self):
+        c=AdaptiveHandoff(200,ramp_seconds=1,hold=1,grace=0,watch=10)
+        duty=self.take_over(c)
+        now=2.0
+        while now<10:
+            duty,ready,_=c.update(now,True,300,duty,360,game_watts=290)
+            self.assertFalse(ready)
+            now+=.5
+        while not ready and now<20:
+            duty,ready,_=c.update(now,True,300,duty,360,game_watts=290)
+            now+=.5
+        self.assertTrue(ready)
+        self.assertLess(now,12)
+    def test_after_the_watch_a_fall_does_not_bring_support(self):
+        c=AdaptiveHandoff(200,ramp_seconds=1,hold=5,grace=0,watch=3)
+        duty=self.take_over(c)
+        duty,_,_=c.update(4,True,300,duty,360,game_watts=290)
+        duty,_,_=c.update(4.5,True,90,duty,360,game_watts=80)
+        self.assertTrue(c.committed)
+    def test_without_watch_nothing_changes(self):
+        c=AdaptiveHandoff(200,ramp_seconds=1,hold=0,grace=0)
+        duty=self.take_over(c)
+        duty,_,_=c.update(2,True,90,duty,360,game_watts=80)
+        self.assertTrue(c.committed)
+        self.assertFalse(c.watching(2))
     def test_short_game_peak_is_not_a_takeover(self):
         c=AdaptiveHandoff(260,ramp_seconds=5,hold=2,grace=0)
         duty=.6

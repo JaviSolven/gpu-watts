@@ -19,6 +19,12 @@ UNIT = .006            # seconds of GPU work per simulated unit
 WINDOW = .5            # how far back our activity is averaged
 LOADING = 6.0          # seconds of loading screen before the game renders
 LOADING_DEMAND = .12   # share of the card a loading screen uses
+# Game patterns. «Menú, carga y juego»: a title menu that already draws a lot,
+# then a loading screen that drops, then the jump into the level.
+DIRECT, WITH_MENU = 'Carga y juego', 'Menú, carga y juego'
+PROFILES = (DIRECT, WITH_MENU)
+MENU, MENU_SHARE = 12.0, .85     # seconds of menu, and its watts as a share of the game's
+LOADING2 = 8.0                   # seconds of the second loading screen
 MB = 1024*1024
 # Example Steam library. Executable names and sizes are INVENTED examples,
 # not the real ones of these games: only the shape of a library is real.
@@ -42,14 +48,14 @@ class SimulatedGpu:
         self.vram_by_driver = False
         self.lock = threading.Lock()
         self.units = collections.deque()  # (finished at, seconds, intensity)
-        self.game = None                  # (exe, opened at, watts)
+        self.game = None                  # (exe, opened at, watts, profile)
         self.watts, self.core = IDLE, 34.0
         self.last = time.monotonic()
         self.random = random.Random(seed)
 
     # The simulated game.
-    def open_game(self, exe, watts):
-        self.game = (exe, time.monotonic(), float(watts))
+    def open_game(self, exe, watts, profile=DIRECT):
+        self.game = (exe, time.monotonic(), float(watts), profile)
 
     def close_game(self):
         self.game = None
@@ -74,11 +80,32 @@ class SimulatedGpu:
         game = self.game
         if game is None:
             return 0.0
-        exe, opened, watts = game
-        if now-opened < LOADING:
+        exe, opened, watts, profile = game
+        elapsed = now-opened
+        if elapsed < LOADING:
             return LOADING_DEMAND
-        demand = (watts-IDLE)/(FULL-IDLE) * (1 + .04*math.sin(now*1.7))
-        return max(0.0, min(1.0, demand))
+        playing = (watts-IDLE)/(FULL-IDLE)
+        if profile == WITH_MENU:
+            if elapsed < LOADING+MENU:
+                playing *= MENU_SHARE
+            elif elapsed < LOADING+MENU+LOADING2:
+                return LOADING_DEMAND
+        return max(0.0, min(1.0, playing * (1 + .04*math.sin(now*1.7))))
+
+    def game_phase(self, now):
+        """What the simulated game is doing, for the panel."""
+        game = self.game
+        if game is None:
+            return 'cerrado'
+        elapsed = now-game[1]
+        if elapsed < LOADING:
+            return 'pantalla de carga'
+        if game[3] == WITH_MENU:
+            if elapsed < LOADING+MENU:
+                return 'menú'
+            if elapsed < LOADING+MENU+LOADING2:
+                return 'pantalla de carga'
+        return 'jugando'
 
     # Our simulated load.
     def compute(self, uuid, mode='Core', vram_mb=512):
