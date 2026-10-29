@@ -371,3 +371,14 @@ ventana de consola: la ventana negra se cierra al instante y solo queda GPU
 Watts. Como ya no hay consola donde ver un fallo, cualquier error inesperado
 (también dentro de la ventana) sale en un aviso y se guarda en
 %LOCALAPPDATA%\GPU_Watts\errores.log, con fecha y hora.
+
+JUEGOS QUE NO SON DE STEAM (CAMBIO TRAS LA 1.0)
+- Botón «Buscar .exe…» en el paso 1: eliges el .exe del juego en el disco y se
+  guarda en la lista con el nombre de su carpeta, saltándose carpetas genéricas
+  (…\Crimson Desert\bin64\CrimsonDesert.exe → «Crimson Desert»).
+- En «Ejecutable vigilado» también se puede pegar la ruta completa, incluso con
+  las comillas de «Copiar como ruta de acceso» de Windows. El programa se queda
+  con el nombre del .exe, que es lo que vigila, y al pulsar INICIAR guarda el
+  juego con el nombre de su carpeta.
+Los procesos se reconocen por el nombre del .exe, no por la carpeta: si dos
+juegos distintos tienen un .exe con el mismo nombre, para GPU Watts son el mismo.

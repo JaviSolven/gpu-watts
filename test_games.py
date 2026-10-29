@@ -94,6 +94,19 @@ class GameStoreTests(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text(encoding='utf-8'))['last'], 'steelnomad.exe')
 
 
+class GameNameTests(unittest.TestCase):
+    def test_name_from_the_game_folder(self):
+        cases = {
+            r'C:\Juegos\Crimson Desert\bin64\CrimsonDesert.exe': 'Crimson Desert',
+            r'C:\Program Files\UL\3DMark\3DMark.exe': '3DMark',
+            r'D:\Epic\MiJuego\Binaries\Win64\MiJuego-Win64-Shipping.exe': 'MiJuego',
+            r'D:\Games\juego.exe': 'juego',
+            r'E:\juego.exe': 'juego',
+        }
+        for path, name in cases.items():
+            self.assertEqual(games.game_name(path), name, path)
+
+
 class SteamTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()

@@ -54,8 +54,14 @@ class ControlTests(unittest.TestCase):
         app.validate(100, 10, 75)
         self.assertEqual(app.normalized_process('Nomad'), 'nomad.exe')
         self.assertEqual(app.normalized_process('TEST.EXE'), 'test.exe')
-        with self.assertRaises(ValueError):
-            app.normalized_process('C:\\test.exe')
+        # A full path keeps only the executable name, with or without the quotes
+        # Windows adds in «Copiar como ruta de acceso».
+        self.assertEqual(app.normalized_process('C:\\Juegos\\Crimson Desert\\bin64\\CrimsonDesert.exe'), 'crimsondesert.exe')
+        self.assertEqual(app.normalized_process('"D:\\Epic\\Juego\\Juego.exe"'), 'juego.exe')
+        self.assertEqual(app.normalized_process('D:/Juegos/juego.exe'), 'juego.exe')
+        for bad in ('C:\\Juegos\\Crimson Desert', 'C:\\Juegos\\*.exe', 'jue?o'):
+            with self.assertRaises(ValueError):
+                app.normalized_process(bad)
     def execute(self, process='', reads=None, duration=.05, stop=None):
         q = queue.Queue()
         with patch.object(app, 'Compute', FakeCompute), patch.object(app, 'process_names', side_effect=reads):

@@ -154,6 +154,21 @@ def game_executables(folder, depth=4):
     return likely_first(found)
 
 
+# Folders that say nothing about which game it is.
+GENERIC_FOLDERS = {'bin', 'bin32', 'bin64', 'x64', 'x86', 'win32', 'win64', 'binaries', 'game', 'retail',
+                   'shipping', 'games', 'juegos', 'common', 'steamapps', 'program files', 'program files (x86)'}
+
+
+def game_name(path):
+    """A readable name for an executable picked from disk: its game folder,
+    skipping generic ones (…\\Crimson Desert\\bin64\\CrimsonDesert.exe → Crimson Desert)."""
+    path = Path(path)
+    for folder in path.parents:
+        if folder.name and folder.name.casefold() not in GENERIC_FOLDERS:
+            return folder.name
+    return path.stem
+
+
 def likely_first(found):
     # The game is usually the largest executable that is not a helper.
     return sorted(found, key=lambda exe: (bool(HELPERS.search(exe[0])), -exe[1], exe[0].casefold()))

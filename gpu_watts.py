@@ -2,6 +2,7 @@
 import ctypes as C
 import csv
 import math
+import ntpath
 import os
 from pathlib import Path
 import queue
@@ -10,7 +11,7 @@ import threading
 import time
 from sensors import NativeSensors, CsvSensors, check_temperatures
 from cutover import Cutover, MODES, read_cpu_times, AdaptiveHandoff, ADAPTIVE_MODE
-from games import GameStore, steam_games, game_executables
+from games import GameStore, steam_games, game_executables, game_name
 from simulation import SimulatedGpu
 
 P = C.c_void_p
@@ -74,11 +75,18 @@ def process_cpu_times(process):
 
 
 def normalized_process(value):
-    value = value.strip()
+    """Executable name to watch. Processes are matched by name, so a full path
+    (also pasted with the quotes of «Copiar como ruta de acceso») is reduced to
+    its file name."""
+    value = value.strip().strip('"').strip()
     if not value:
         return ''
-    if any(c in value for c in ('/', '\\', ':', '*', '?', '"')):
-        raise ValueError('Escribe solo el nombre del proceso, sin ruta ni comodines.')
+    if any(c in value for c in ('*', '?', '"')):
+        raise ValueError('Escribe el nombre del .exe o su ruta completa, sin comodines.')
+    if any(c in value for c in ('/', '\\', ':')):
+        value = ntpath.basename(value)
+        if not value.lower().endswith('.exe'):
+            raise ValueError('La ruta tiene que terminar en el .exe del juego.')
     return (value if value.lower().endswith('.exe') else value + '.exe').casefold()
 
 
@@ -630,8 +638,11 @@ HELP = {
             'con los que lo usaste la última vez. Cada INICIAR guarda los ajustes del juego.',
     'steam': 'Añade un juego de tu biblioteca de Steam sin tener que abrirlo: eliges el juego y su .exe.',
     'forget': 'Quita de la lista el juego elegido, con sus ajustes.',
+    'browse': 'Para juegos que no son de Steam (Epic, GOG, 3DMark suelto…): eliges su .exe en el disco y se '
+              'guarda en la lista con el nombre de su carpeta.',
     'process': 'El .exe del juego que GPU Watts espera ver aparecer para hacer el relevo. Se rellena al elegir un '
-               'juego de la lista; también puedes escribirlo o elegirlo en el desplegable con el juego abierto. '
+               'juego de la lista; también puedes escribirlo, pegar su ruta completa (se queda solo con el '
+               'nombre) o elegirlo en el desplegable con el juego abierto. '
                'Aunque lo abras desde Steam, Steam arranca este mismo .exe. Vacío = sin relevo: solo carga '
                'durante el tiempo máximo.',
     'base': 'Consumo TOTAL de la tarjeta que se mantiene antes de abrir el juego, en W. No son W de más: incluye '
@@ -800,6 +811,9 @@ def main(simulate=False):
     steam_button = ttk.Button(game_row, text='Steam…')
     steam_button.pack(side='left', padx=(8, 0))
     tip(steam_button, texts['steam'])
+    browse_button = ttk.Button(game_row, text='Buscar .exe…')
+    browse_button.pack(side='left', padx=(6, 0))
+    tip(browse_button, texts['browse'])
     forget_button = ttk.Button(game_row, text='Olvidar')
     forget_button.pack(side='left', padx=(6, 0))
     tip(forget_button, texts['forget'])
@@ -1126,6 +1140,20 @@ def main(simulate=False):
             choose_game()
         ttk.Button(frame, text='Guardar y elegir', command=use_selected).pack(anchor='e', pady=(10, 0))
     steam_button.configure(command=open_steam)
+    def browse_exe():
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(title='Elige el .exe del juego', filetypes=[('Programas', '*.exe')])
+        if not path:
+            return
+        exe = normalized_process(path)
+        try:
+            store.add(exe, game_name(path))
+        except OSError as exc:
+            messagebox.showerror('Juegos', f'No se pudo guardar la lista: {exc}')
+            return
+        refresh_games(exe)
+        choose_game()
+    browse_button.configure(command=browse_exe)
     stop, messages = threading.Event(), queue.Queue()
     worker = None
     watching = False
@@ -1136,6 +1164,7 @@ def main(simulate=False):
         gpu.configure(state='disabled' if running else 'readonly')
         game_box.configure(state='disabled' if running else 'readonly')
         steam_button.configure(state='disabled' if running else 'normal')
+        browse_button.configure(state='disabled' if running else 'normal')
         forget_button.configure(state='disabled' if running else 'normal')
         process_box.configure(state='disabled' if running else 'normal')
         trigger_box.configure(state='disabled' if running else 'readonly')
@@ -1171,7 +1200,9 @@ def main(simulate=False):
                 source = telemetry.sensors(monitor_vram=source_box.current() != 2)
             else:
                 source = NativeSensors(telemetry, telemetry.devices[gpu.current()][0], monitor_vram=source_box.current() != 2)
-            watched = normalized_process(process_box.get())
+            typed = process_box.get().strip().strip('"')
+            watched = normalized_process(typed)
+            process_box.set(watched)  # a pasted path is shown as the name actually watched
             trigger_values = [float(e.get().replace(',', '.')) for e in trigger_fields]
             trigger = Cutover(trigger_box.get(), *trigger_values[:4]) if watched else None
             ramp_seconds = trigger_values[4]
@@ -1187,6 +1218,8 @@ def main(simulate=False):
         summary_text.set('')
         if watched:
             try:
+                if any(c in typed for c in '/\\:') and store.games.get(watched, {}).get('name', watched) == watched:
+                    store.add(watched, game_name(typed))  # pasted path: name it after its folder
                 store.remember(watched, current_settings())
                 refresh_games(watched)
             except OSError as exc:
